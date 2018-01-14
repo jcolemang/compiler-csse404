@@ -41,7 +41,7 @@
                       (movq (var x) (var z))
                       (addq (var w) (var z))
                       (movq (var y) (var t.1))
-                      (negq (var t.1))
+                      (neg (var t.1))
                       (movq (var z) (var t.2))
                       (addq (var t.1) (var t.2))
                       (movq (var t.2) (reg rax)))))
@@ -72,7 +72,7 @@
         (smaller-prog-two
          '(program
            (a)
-           ((mov (int 5) (var a))
+           ((movq (int 5) (var a))
             (neg (var a)))))
         (smaller-live-after-two
          (sort-sym-ls '((a) ())))
@@ -87,13 +87,20 @@
     (test-suite
      "Live after function tests"
 
-     (check-equal? (sort-sym-ls (live-after (caddr smaller-prog)))
+     (check-equal? (sort-sym-ls
+                    (map cadr
+                         (live-after-sets (caddr smaller-prog))))
                    smaller-live-after)
-     (check-equal? (sort-sym-ls (live-after (caddr smaller-prog-two)))
+     (check-equal? (sort-sym-ls
+                    (map cadr
+                         (live-after-sets (caddr smaller-prog-two))))
                    smaller-live-after-two)
-     (check-equal? (live-after (caddr mov-prog))
+     (check-equal? (map cadr
+                        (live-after-sets (caddr mov-prog)))
                    mov-live-after)
-     (check-equal? (sort-sym-ls (live-after (caddr book-prog)))
+     (check-equal? (sort-sym-ls
+                    (map cadr
+                         (live-after-sets (caddr book-prog))))
                    book-live-after-sets)
      )))
 
@@ -109,7 +116,7 @@
                       (movq (var x) (var z))
                       (addq (var w) (var z))
                       (movq (var y) (var t.1))
-                      (negq (var t.1))
+                      (neg (var t.1))
                       (movq (var z) (var t.2))
                       (addq (var t.1) (var t.2))
                       (movq (var t.2) (reg rax)))))
@@ -130,13 +137,11 @@
     (test-suite
      "Tests for interference graph construction"
      (check-pred (lambda (x) (graph-equal? (car x) (cadr x)))
-                 (list (construct-graph small-instrs
-                                        (live-after small-instrs))
+                 (list (construct-graph (live-after-sets small-instrs))
                        small-graph))
 
      (check-pred (lambda (x) (graph-equal? (car x) (cadr x)))
-                 (list (construct-graph (caddr book-prog)
-                                        (live-after (caddr book-prog)))
+                 (list (construct-graph (live-after-sets (caddr book-prog)))
                        book-graph))
      )))
 
@@ -207,17 +212,17 @@
                 "r1"
                 (range 1 49))
 
-;; (compiler-tests "r2-compiler"
-;;                 #f
-;;                 (reverse `((print-instructions  ,print-instructions               nothing)
-;;                            (patch-instructions  ,patch-instructions               nothing)
-;;                            (add-bookkeeping     ,add-bookkeeping                  nothing)
-;;                            (add-register-saves  ,add-register-saves               nothing)
-;;                            (allocate-registers  ,allocate-registers               nothing)
-;;                            (build-interference  ,build-interference               nothing)
-;;                            (uncover-live        ,uncover-live                     nothing)
-;;                            (select-instructions ,select-instructions              nothing)
-;;                            (flatten             ,flatten                          nothing)
-;;                            (uniquify            ,(uniquify (u-state built-ins 0)) nothing)))
-;;                 "r2"
-;;                 (range 1 60))
+(compiler-tests "r2-compiler"
+                #f
+                (reverse `((print-instructions  ,print-instructions               nothing)
+                           (patch-instructions  ,patch-instructions               nothing)
+                           (add-bookkeeping     ,add-bookkeeping                  nothing)
+                           (add-register-saves  ,add-register-saves               nothing)
+                           (allocate-registers  ,allocate-registers               nothing)
+                           (build-interference  ,build-interference               nothing)
+                           (uncover-live        ,uncover-live                     nothing)
+                           (select-instructions ,select-instructions              nothing)
+                           (flatten             ,flatten                          nothing)
+                           (uniquify            ,(uniquify (u-state built-ins 0)) nothing)))
+                "r2"
+                (range 1 60))

@@ -8,11 +8,28 @@
 ;; NOTE Look into using type information in garbage collecting. See page 82
 
 
+;; Need to get uncover-live to spit out data which indicates whether it was a
+;; simple instruction or an if statement. For the if statements, recursive
+;; processing is also necessary. The next step, build-interference, needs to
+;; interpret these and act recursively on the if statements as well.
+
+
 (require "utilities.rkt")
 (require racket/trace)
 
 ;; My helpers
 
+(define-for-syntax DEBUGGING #f)
+
+(define-syntax debug-define
+  (lambda (exp)
+    (syntax-case exp ()
+      [(_ name body)
+       (if DEBUGGING
+           #'(trace-define name body)
+           #'(define name body))])))
+
+;; basically just bind for something similar to a maybe monad
 (define-syntax >>=
   (syntax-rules (<-)
     [(_ x <- exp rest ...)
@@ -26,10 +43,14 @@
          x)]
     [(_ x) x]))
 
+;; a sort of let* shorthand, inspired by do notation
 (define-syntax -->
-  (syntax-rules (<-)
+  (syntax-rules (<- rec)
     [(_ x <- exp rest ...)
      (let ((x exp))
+       (--> rest ...))]
+    [(_ recur x <- exp rest ...)
+     (letrec ((x exp))
        (--> rest ...))]
     [(_ x next rest ...)
      (begin x
@@ -127,7 +148,6 @@
                    (add-edge-help to
                                   from
                                   graph))))
-
 
 (define add-edge-help
   (lambda (from to graph)
@@ -271,108 +291,126 @@
 (struct u-state
   (assoc-list curr-num))
 
-(define (uniquify state)
-  (lambda (exp)
-    (let ((assoc-list (u-state-assoc-list state))
-          (same-state-uniquify (uniquify state)))
+;; TODO make uniquify itself non-recursive to make it easier to debug
+(define uniquify
+  (lambda (state)
+    (lambda (exp)
+      (let ((assoc-list (u-state-assoc-list state))
+            (same-state-uniquify (uniquify state)))
+        (match exp
+          [`(program ,exps ...)
+           `(program ,(map same-state-uniquify exps))]
+          [(? integer?) exp]
+          [(? boolean?) exp]
+          [(? symbol?)
+           (or (variable-lookup exp assoc-list)
+               (error 'uniquify "Unbound variable: ~a" exp))]
+          [`(if ,test ,true ,false)
+           `(if ,(same-state-uniquify test)
+                ,(same-state-uniquify true)
+                ,(same-state-uniquify false))]
+          ;; [`(and ,rands ...)
+          ;;  `(and ,@(map same-state-uniquify rands))]
+          ;; [`(not ,rand)
+          ;;  `(not ,(same-state-uniquify rand))]
+          [`(let ([,var ,val])
+              ,body)
+           (let ([new-sym (gensym)])
+             `(let ([,new-sym ,(same-state-uniquify val)])
+                ,((uniquify (struct-copy u-state
+                                         state
+                                         (assoc-list (cons (cons var new-sym)
+                                                           assoc-list))))
+                  body)))]
+          [`(,operator ,operands ...)
+           (let ((f (uniquify state)))
+             `(,(f operator)
+               ,@(map f operands)))])))))
+
+;; (define flatten
+(debug-define flatten
+  (letrec ((recur
+            (lambda (exp)
+              (match exp
+                [(? integer?)
+                 (values '() exp '())]
+                [(? boolean?)
+                 (values '() exp '())]
+                [(? symbol?)
+                 (values '() exp `(,exp))]
+                [`(let ((,x ,assgn)) ,body)
+                 (let-values ([(assgn-assignments assgn-value assgn-vars)
+                               (recur assgn)]
+                              [(body-assignments body-value body-vars)
+                               (recur body)])
+                   (values `(,@assgn-assignments
+                             (assign ,x ,assgn-value)
+                             ,@body-assignments)
+                           body-value
+                           `(,@assgn-vars
+                             ,@body-vars
+                             ,x)))]
+                [`(if ,test ,true ,false)
+                 (let-values ([(test-assgns test-value test-vars)
+                               (recur test)]
+                              [(true-assgns true-value true-vars)
+                               (recur true)]
+                              [(false-assgns false-value false-vars)
+                               (recur false)])
+                   (let ((if-var (gensym)))
+                     (values `(,@test-assgns
+                               (if (eq? #t ,test-value)
+                                   (,@true-assgns
+                                    (assign ,if-var ,true-value))
+                                   (,@false-assgns
+                                    (assign ,if-var ,false-value))))
+                             if-var
+                             (append test-vars true-vars false-vars))))]
+                [`(and ,rands ...)
+                 (match rands
+                   [`()
+                    (values '() #t '())]
+                   [`(,rand ,rest ...)
+                    (recur `(if ,rand
+                                (and ,@rest)
+                                #f))])]
+                [`(,rator ,(? integer? x) ...)
+                 (let ((new-sym (gensym)))
+                   (values `((assign ,new-sym ,exp))
+                           new-sym
+                           `(,new-sym)))]
+                [`(,rator ,rands ...)
+                 (let ((results (map (lambda (exp)
+                                       (let-values ([(assignments value vars)
+                                                     (recur exp)])
+                                         `(,assignments
+                                           ,value
+                                           ,vars)))
+                                     rands))
+                       (new-sym (gensym)))
+                   (values `(,@(concat-map car results)
+                             (assign ,new-sym (,rator ,@(map cadr results))))
+                           new-sym
+                           `(,new-sym
+                             ,@(concat-map caddr results))))]))))
+    (lambda (exp)
       (match exp
-        [`(program ,exps ...)
-         `(program ,(map same-state-uniquify exps))]
-        [(? integer?) exp]
-        [(? boolean?) exp]
-        [(? symbol?)
-         (or (variable-lookup exp assoc-list)
-             (error 'uniquify "Unbound variable: ~a" exp))]
-        [`(if ,test ,true ,false)
-         `(if ,(same-state-uniquify test)
-              ,(same-state-uniquify true)
-              ,(same-state-uniquify false))]
-        [`(let ([,var ,val])
-            ,body)
-         (let ([new-sym (gensym)])
-           `(let ([,new-sym ,(same-state-uniquify val)])
-              ,((uniquify (struct-copy u-state
-                                       state
-                                       (assoc-list (cons (cons var new-sym)
-                                                         assoc-list))))
-                body)))]
-        [`(,operator ,operands ...)
-         (let ((f (uniquify state)))
-           `(,(f operator)
-             ,@(map f operands)))]))))
+        [`(program ,exps)
+         (let ((flat (map (lambda (exp)
+                            (let-values ([(assignments value vars)
+                                          (recur exp)])
+                              `(,assignments ,value ,vars)))
+                          exps)))
+           `(program ,(foldl set-insert
+                             '()
+                             (concat-map caddr flat))
+                     ,(concat-map (lambda (assgns val)
+                                    `(,@assgns
+                                      (return ,val)))
+                                  (map car flat)
+                                  (map cadr flat))))]))))
 
-(define flatten
-  (lambda (exp)
-    (match exp
-      [`(program ,exps)
-       (let ((flat (map (lambda (exp)
-                          (let-values ([(assignments value vars)
-                                        (flatten exp)])
-                            `(,assignments ,value ,vars)))
-                        exps)))
-         `(program ,(foldl set-insert
-                           '()
-                           (concat-map caddr flat))
-                   ,(concat-map (lambda (assgns val)
-                                  `(,@assgns
-                                    (return ,val)))
-                                (map car flat)
-                                (map cadr flat))))]
-      [(? integer?)
-       (values '() exp '())]
-      [(? boolean?)
-       (values '() exp '())]
-      [(? symbol?)
-       (values '() exp `(,exp))]
-      [`(let ((,x ,assgn)) ,body)
-       (let-values ([(assgn-assignments assgn-value assgn-vars)
-                     (flatten assgn)]
-                    [(body-assignments body-value body-vars)
-                     (flatten body)])
-         (values `(,@assgn-assignments
-                   (assign ,x ,assgn-value)
-                   ,@body-assignments)
-                 body-value
-                 `(,@assgn-vars
-                   ,@body-vars
-                   ,x)))]
-      [`(if ,test ,true ,false)
-       (let-values ([(test-assgns test-value test-vars)
-                     (flatten test)]
-                    [(true-assgns true-value true-vars)
-                     (flatten true)]
-                    [(false-assgns false-value false-vars)
-                     (flatten false)])
-         (let ((if-var (gensym)))
-           (values `(,@test-assgns
-                     (if (eq? #t test-value)
-                         (,@true-assgns
-                          (assign ,if-var ,true-value))
-                         (,@false-assgns
-                          (assign ,if-var ,false-value))))
-                   if-var
-                   (append test-vars true-vars false-vars))))]
-      [`(,rator ,(? integer? x) ...)
-       (let ((new-sym (gensym)))
-         (values `((assign ,new-sym ,exp))
-                 new-sym
-                 `(,new-sym)))]
-      [`(,rator ,rands ...)
-       (let ((results (map (lambda (exp)
-                             (let-values ([(assignments value vars)
-                                           (flatten exp)])
-                               `(,assignments
-                                 ,value
-                                 ,vars)))
-                           rands))
-             (new-sym (gensym)))
-         (values `(,@(concat-map car results)
-                   (assign ,new-sym (,rator ,@(map cadr results))))
-                 new-sym
-                 `(,new-sym
-                   ,@(concat-map caddr results))))])))
-
-(define select-instructions
+(debug-define select-instructions
   (lambda (prog)
     (letrec ((expand
               (lambda (exp)
@@ -382,6 +420,12 @@
                   [(? boolean?) `(bool ,exp)]
                   [`(assign ,var ,val)
                    (expand-into-var val var)]
+                  [`(eq? ,exp1 ,exp2)
+                   `(eq? ,(expand exp1) ,(expand exp2))]
+                  [`(if ,test ,true ,false)
+                   `((if ,(expand test)
+                         ,(concat-map expand true)
+                         ,(concat-map expand false)))]
                   [`(return ,x)
                    `((movq ,(expand x) (reg rax)))])))
              (expand-into-var
@@ -396,12 +440,27 @@
                   [`(- ,val)
                    `((movq ,(expand val) (var ,var))
                      (neg (var ,var)))]
+                  [`(not ,val)
+                   `((movq (int 1) (var ,var))
+                     (xorq ,(expand val) (var ,var)))]
+                  [`(eq? ,arg1 ,arg2)
+                   `((cmpq ,(expand arg2) ,(expand arg1))
+                     (set e (byte-reg al))
+                     (movzbq (byte-reg al) ,var))]
                   [val
                    `((movq ,(expand val) (var ,var)))]))))
+             ;; [`(assign ,var ,val)
+             ;;  `((movq ,(expand val) (var ,var)))])))
+
+
       (match prog
         [`(program ,vars ,code)
          `(program ,vars
                    ,(concat-map expand code))]))))
+
+        ;; [`(assign ,var (+ ,(? integer? val1) ,(? integer? val2)))
+        ;;  `((movq (int ,val1) (var ,var))
+        ;;    (addq (int ,val2) (var ,var)))]
 
 (define get-offset
   (lambda (var vars)
@@ -409,7 +468,7 @@
 
 ;; this will need modification if the saves and restores are to be offset by
 ;; more than a single instruction.
-(define add-register-saves
+(debug-define add-register-saves
   (let ((helper
          (lambda (live-regss instrs)
            (let ((to-backup (map (lambda (live-regs instr)
@@ -438,7 +497,7 @@
 ;; I should add register saves and such here. callq should save all caller save
 ;; registers, and this should add pushs and pops at the top of all functions. In
 ;; this case, the only function is main.
-(define add-bookkeeping
+(debug-define add-bookkeeping
   (lambda (prog)
     (match prog
       [`(program ,stack-num ,instrs)
@@ -470,83 +529,193 @@
        `((movq (deref ,var ,off) (reg rax))
          (neg (reg rax))
          (movq (reg rax) (deref ,var ,off)))]
+      [`(cmpq ,arg (int ,num))
+       `((movq (int ,num) (reg rax))
+         (cmpq ,arg (reg rax)))]
+      [`(cmpq ,arg (bool ,b))
+       `((movq (bool ,b) (reg rax))
+         (cmpq ,arg (reg rax)))]
       [`(movq (reg ,reg) (reg ,reg))
        '()]
       [x `(,x)])))
 
-(define patch-instructions
+(debug-define patch-instructions
   (lambda (prog)
     (match prog
       [`(program ,x ,insts)
        `(program ,x
                  ,(concat-map patch-instruction insts))])))
 
-(define (print-instructions prog)
-  (match prog
-    [`(program ,stack-num ,insts)
-     (apply string-append
-            (intercalate "\n"
-                         `("	.globl main"
-                           "main:"
-                           ,@(map print-instructions insts)
-                           "\n")))]
-    [`(reg ,reg) (format "%~a" reg)]
-    [`(int ,num) (format "$~a" num)]
-    [`(deref ,reg ,offset)
-     (format "~a(%~a)" offset reg)]
-    [`(,rator ,inst1 ,inst2)
-     (format "	~a	~a,	~a"
-             rator
-             (print-instructions inst1)
-             (print-instructions inst2))]
-    [`(,rator ,rand)
-     (format "	~a	~a"
-             rator
-             (print-instructions rand))]
-    [`(,x) (format "	~a" x)]
-    [x (format "~a" x)]))
+(define print-instructions
+  (lambda (prog)
+    (match prog
+      [`(program ,stack-num ,insts)
+       (apply string-append
+              (intercalate "\n"
+                           `("	.globl main"
+                             "main:"
+                             ,@(map print-instructions insts)
+                             "\n")))]
+      [`(reg ,reg) (format "%~a" reg)]
+      [`(label ,label) (format "~a" label)]
+      [`(label-pos ,label) (format "~a:" label)]
+      [`(int ,num) (format "$~a" num)]
+      [`(bool #t) (format "$1")]
+      [`(bool #f) (format "$0")]
+      [`(deref ,reg ,offset)
+       (format "~a(%~a)" offset reg)]
+      [`(jmp-if equal ,location)
+       (format "	je	~a" (print-instructions location))]
+      [`(,rator ,inst1 ,inst2)
+       (format "	~a	~a,	~a"
+               rator
+               (print-instructions inst1)
+               (print-instructions inst2))]
+      [`(,rator ,rand)
+       (format "	~a	~a"
+               rator
+               (print-instructions rand))]
+      [`(,x) (format "	~a" x)]
+      [x (format "~a" x)])))
 
 (define get-read-vars
-  (lambda (instr)
-    (match instr
-      [`(movq (var ,var) ,_) `(,var)]
-      [`(addq (var ,var1) (var ,var2)) `(,var1 ,var2)]
-      [`(addq ,_ (var ,var)) `(,var)]
-      [`(neg (var ,var)) `(,var)]
-      [`(,instr (var ,var) ,_) `(,var)]
-      [_ '()])))
+  (letrec ((std-two-arg-reads
+            (lambda (instr)
+              (match instr
+                [`(,_ (var ,var1) (var ,var2))
+                 `(,var1 ,var2)]
+                [`(,_ (var ,var) ,_)
+                 `(,var)]
+                [`(,_ ,_ (var ,var))
+                 `(,var)]
+                [`(,_ ,_ ,_) '()])))
+           (std-one-arg-reads
+            (lambda (instr)
+              (match instr
+                [`(,_ (var ,var))
+                 `(,var)]))))
+    (lambda (instr)
+      (match instr
+        [`(movq (var ,var) ,_) `(,var)]
+        [`(movq ,_ ,_) '()]
+        [`(callq ,_) '()]
+        [(or `(addq ,_ ,_)
+             `(eq? ,_ ,_)
+             `(xorq ,_ ,_))
+         (std-two-arg-reads instr)]
+        ;; [`(addq ,_ ,_) ]
+        ;; [`(xorq ,_ ,_) (std-two-arg-reads instr)]
+        [`(neg ,_) (std-one-arg-reads instr)]
+        [`(not ,_) (std-one-arg-reads instr)]
+        [_ (error 'get-read-vars "Unrecognized instruction: ~a" instr)]))))
 
 (define get-written-vars
-  (lambda (instr)
-    (match instr
-      [`(,inst ,_ (var ,var)) `(,var)]
-      [`(neg (var ,var)) `(,var)]
-      [_ '()])))
+  (letrec ((std-two-arg-writes
+            (lambda (instr)
+              (match instr
+                [`(,_ ,_ (var ,var))
+                 `(,var)]))))
+    (lambda (instr)
+      (match instr
+        [`(movq ,_ (var ,var))
+         `(,var)]
+        [(or `(addq ,_ ,_)
+             `(eq? ,_ ,_))
+         (std-two-arg-writes instr)]
+        [`(callq ,_) '()]
+        [`(neg (var ,var))
+         `(,var)]
+        [`(not (var ,var))
+         `(,var)]
+        [_ (error 'get-written-vars "Unrecognized instruction: ~a" instr)]))))
 
-(define live-after
-  (letrec ((helper
+;; need to refactor this to actually modify the instructions instead of
+;; returning a parallel list
+(define live-after-sets
+  (letrec ((get-live-vars
+            (lambda (live-set)
+              (match live-set
+                [_
+                 live-set])))
+           (set-calculation
+            (lambda (reads writes live-vars)
+              (set-union reads
+                         (set-difference live-vars
+                                         writes))))
+           (live-before
+            (lambda (curr-instr live-after)
+              (match curr-instr
+                [`(if ,test ,true ,false)
+                 (let-values ([(live-before-test test-instrs)
+                               (live-after-prime (list test))]
+                              [(live-before-true true-instrs)
+                               (live-after-prime true)]
+                              [(live-before-false false-instrs)
+                               (live-after-prime false)])
+                   (set-union live-before-true
+                              live-before-false
+                              live-before-test))]
+                 ;; (let ((test-live (live-after-sets (list test)))
+                 ;;       (true-live (live-after-sets true))
+                 ;;       (false-live (live-after-sets false)))
+                 ;;   (error 'live-before "This is incorrect"))]
+                   ;; (set-union test-live true-live false-live))]
+                [_
+                 (--> reads  <- (get-read-vars curr-instr)
+                      writes <- (get-written-vars curr-instr)
+                      ;; `(instr ,(set-calculation reads writes live-after)))])))
+                      (set-calculation reads writes live-after))])))
+           (live-after-prime
             (lambda (instrs)
-              (cond
-               [(null? instrs) '()]
-               [(null? (cdr instrs)) `(,(get-read-vars (car instrs)) ())]
-               [else
-                (let* ((curr (car instrs))
-                       (rest (helper (cdr instrs)))
-                       (next (car rest))
-                       (reads (get-read-vars curr))
-                       (writes (get-written-vars curr)))
-                  (cons (set-union reads
-                                   (set-difference next
-                                                   writes))
-                        rest))]))))
+              (let ((curr (car instrs)))
+                (match curr
+                  [`(if ,test ,true ,false)
+                   (let-values ([(live-before-test test-instrs)
+                                 (live-after-prime (list test))]
+                                [(live-before-true true-instrs)
+                                 (live-after-prime true)]
+                                [(live-before-false false-instrs)
+                                 (live-after-prime false)]
+                                [(live-before-rest rest-instrs)
+                                 (live-after-prime (cdr instrs))])
+                     (let ((live-before-if (set-union live-before-true
+                                                      live-before-false
+                                                      live-before-test)))
+                       (values live-before-if
+                               (cons `((if ,test-instrs
+                                           ,true-instrs
+                                           ,false-instrs)
+                                       ,live-before-if)
+                                     rest-instrs))))]
+                  [else
+                   (cond
+                    ;; nothing is live after the last instruction
+                    [(null? (cdr instrs))
+                     (values (get-read-vars curr)
+                             `((,curr ())))]
+                    [else
+                     (let-values ([(live-after processed-instrs)
+                                   (live-after-prime (cdr instrs))])
+                       (values (live-before curr live-after)
+                               (cons `(,curr ,live-after)
+                                     processed-instrs)))])])))))
+                    ;; (--> rest <- (live-after-prime (cdr instrs))
+                    ;;    next <- (car rest)
+                    ;;    (cons `(,curr (live-before curr next))
+                    ;;          rest))])))))
     (lambda (instrs)
-      (cdr (helper instrs)))))
+      ;; L_before is only used for the previous instruction's L_after, making
+      ;; the first set useless for our analysis
+      (let-values ([(_ new-instrs)
+                    (live-after-prime instrs)])
+        new-instrs))))
 
-(define uncover-live
+(debug-define uncover-live
   (lambda (prog)
     (match prog
       [`(program ,x ,instrs)
-       `(program ,(live-after instrs) ,x ,instrs)])))
+       ;; `(program ,(live-after-sets instrs) ,x ,instrs)])))
+       `(program ,x ,(live-after-sets instrs))])))
 
 (define add-interference-edges
   (lambda (instr live-vars graph)
@@ -565,30 +734,87 @@
                   d
                   (add-nodes `(,s ,d) graph))]
       [(or `(movq ,_ (var ,d))
-           `(,_ (var ,d)))
+           `(neg (var ,d)))
        (add-edges (filter (lambda (v)
                             (not (eqv? v d)))
                           live-vars)
                   d
                   (add-nodes `(,d) graph))]
-      [_ graph])))
+       ;; (match live-vars
+       ;;   [`(if-exp ,all-live-vars
+       ;;             ,test-exp ,test-live-vars
+       ;;             ,true-exp ,true-live-vars
+       ;;             ,false-exp ,false-live-vars)
+       ;;    (error 'not-yet-implemented "if stuff is tricky")]
+       ;;   [`(instr ,live-vars)
+       ;;    (error 'not-yet-implemented "not yet sure what to do here")])]
+      [(or `(callq ,_)
+           `(movq ,_ ,_)
+           `(addq ,_ ,_)
+           `(eq? ,_ ,_))
+       graph])))
+
 
 (define construct-graph
-  (lambda (instrs liveness)
-    (foldl (lambda (p graph)
-             (let ((instr (car p))
-                   (live-vars (cdr p)))
-               (add-interference-edges instr live-vars graph)))
-           (make-graph)
-           (map cons instrs liveness))))
+  (letrec ((handle-pair
+            (lambda (p graph)
+              (let ((instr (car p))
+                    (live-vars (cadr p)))
+                (match instr
+                  [`(if ,test ,true ,false)
+                   ;; this is wrong. the live vars are already in pairs, and i
+                   ;; think that they are wrong in the context of this if
+                   ;; (--> test-graph <- (handle-instrs (cons test
+                   ;;                                         live-vars)
+                   ;;                                   graph)
+                   ;;      true-graph <- (handle-instrs (cons true
+                   ;;                                         live-vars)
+                   ;;                                   test-graph)
+                   ;;      false-graph <- (handle-instrs (cons false
+                   ;;                                          live-vars)
+                   ;;                                    true-graph)
+                   ;;      false-graph)]
+                   (--> test-graph <- (handle-instrs test
+                                                     graph)
+                        true-graph <- (handle-instrs true
+                                                     test-graph)
+                        false-graph <- (handle-instrs false
+                                                      true-graph)
+                        false-graph)]
+                  [_
+                   (add-interference-edges instr live-vars graph)]))))
+           (handle-instrs
+            (lambda (instrs graph)
+              (foldl handle-pair
+                     graph
+                     instrs))))
+    (lambda (instrs)
+      (handle-instrs instrs
+                     (make-graph)))))
 
-(define build-interference
+;; (debug-define construct-graph
+;;   (lambda (instrs)
+;;     (foldl (lambda (p graph)
+;;              (let ((instr (car p))
+;;                    (live-vars (cadr p)))
+;;                (match instr
+;;                  [`(if ,test ,true ,false)
+;;                   (error 'construct-graph "nyi")]
+;;                  [_
+;;                   (add-interference-edges instr live-vars graph)])))
+;;            (make-graph)
+;;            instrs)))
+
+(debug-define build-interference
   (lambda (prog)
     (match prog
-      [`(program ,live-after-list ,vars ,instrs)
-       `(program ,(construct-graph instrs
-                                   live-after-list)
-                 ,live-after-list
+      ;; [`(program ,live-after-list ,vars ,instrs)
+      ;;  `(program ,(construct-graph instrs
+      ;;                              live-after-list)
+      ;;            ,live-after-list
+      ;;            ,instrs)])))
+      [`(program ,vars ,instrs)
+       `(program ,(construct-graph instrs)
                  ,instrs)])))
 
 (define caller-save?
@@ -624,52 +850,106 @@
 (define word-size 8)
 
 ;; need to add mappings to actual registers as well as stack locations
-(define allocate-registers
+(debug-define allocate-registers
   (letrec ((assign-reg
             (lambda (mapping)
               (lambda (datum)
-                (match datum
-                  [`(var ,var)
-                   (hash-ref mapping var)]
-                  [`(,instr ,args ...)
-                   `(,instr ,@(map (assign-reg mapping) args))]
-                  [x x])))))
-    ;; (lambda (caller-save callee-save)
+                (let ((recur (assign-reg mapping)))
+                  (match datum
+                    [`(var ,var)
+                     (hash-ref mapping var)]
+                    [`(if ,test ,true ,false)
+                     `(if ,(map recur test)
+                          ,(map recur true)
+                          ,(map recur false))]
+                    [`(,instr ,args ...)
+                     `(,instr ,@(map recur args))]
+                    [x x])))))
+           (rem-live-vars
+            (lambda (instrs)
+              (if (null? instrs)
+                  '()
+                  (--> curr <- (car instrs)
+                       rest <- (rem-live-vars
+                                (cdr instrs))
+                       (match curr
+                         [`((if ,test
+                                ,true
+                                ,false)
+                            ,_)
+                          (cons `(if ,(rem-live-vars test)
+                                     ,(rem-live-vars true)
+                                     ,(rem-live-vars false))
+                                rest)]
+                         [_ (cons (caar instrs)
+                                  (rem-live-vars
+                                   (cdr instrs)))]))))))
       (lambda (prog)
         (match prog
-          [`(program ,graph ,live-vars ,instrs)
-           (let* ((get-color-var car)
-                  (get-color-num cdr)
-                  (colors (color-graph graph))
-                  (num-colors (if (null? colors)
+          [`(program ,graph ,instrs)
+           (--> get-color-var <- car
+                get-color-num <- cdr
+                colors <- (color-graph graph)
+                num-colors <- (if (null? colors)
                                   0
-                                  (apply max (map get-color-num colors))))
-                  (all-regs (append caller-save-regs
-                                    callee-save-regs))
-                  (num-regs (length all-regs))
-                  (reg-mapping
-                   (map (lambda (color)
-                          (let ((color-num (cdr color)))
-                            (cons (get-color-var color)
-                                  (if (>= (get-color-num color) num-regs)
-                                      `(deref rsp ,(* word-size (- color-num num-regs)))
-                                      `(reg ,(list-ref all-regs color-num))))))
-                        colors))
-                  (reg-map (make-immutable-hasheqv reg-mapping)))
-             `(program ,(let ((stack-num (- (add1 num-colors)
-                                            (length caller-save-regs))))
-                          (max (* stack-num word-size) 0))
-                       ,(map (lambda (vars)
-                               (concat-map (lambda (var)
-                                             (match (hash-ref reg-map var)
-                                               [`(reg ,reg)
-                                                `(,reg)]
-                                               [_ '()]))
-                                           vars))
-                             live-vars)
-                       ;; ,live-vars
-                       ,(map (assign-reg reg-map)
-                             instrs)))]))))
+                                  (apply max (map get-color-num colors)))
+                all-regs <- (append caller-save-regs
+                                    callee-save-regs)
+                num-regs <- (length all-regs)
+                reg-mapping <- (map
+                                (lambda (color)
+                                  (let ((color-num (cdr color)))
+                                    (cons (get-color-var color)
+                                          (if (>= (get-color-num color)
+                                                  num-regs)
+                                              `(deref rsp ,(* word-size
+                                                              (- color-num
+                                                                 num-regs)))
+                                              `(reg ,(list-ref all-regs
+                                                               color-num))))))
+                                colors)
+                reg-map <- (make-immutable-hasheqv reg-mapping)
+                `(program ,(let ((stack-num (- (add1 num-colors)
+                                               (length caller-save-regs))))
+                             (max (* stack-num word-size) 0))
+                          ,(map (lambda (vars)
+                                  (concat-map (lambda (var)
+                                                (match (hash-ref reg-map var)
+                                                  [`(reg ,reg)
+                                                   `(,reg)]
+                                                  [_ '()]))
+                                              vars))
+                                (map cadr instrs))
+                          ;; ,live-vars
+                          ,(map (assign-reg reg-map)
+                                (rem-live-vars instrs))))]))))
+
+(define lower-conditionals
+  (letrec ((lower-condition
+            (lambda (instr)
+              (match instr
+                [`(if ((,cmp ,arg1 ,arg2))
+                      ,true
+                      ,false)
+                 (let ((then-label (gensym))
+                       (end-label (gensym)))
+                   `((cmpq ,arg2 ,arg1)
+                     (jmp-if equal (label ,then-label))
+                     ,@(concat-map lower-condition
+                                   false)
+                     (jmp (label ,end-label))
+                     (label-pos ,then-label)
+                     ,@(concat-map lower-condition
+                                   true)
+                     (label-pos ,end-label)))]
+                [_ (list instr)]))))
+    (lambda (prog)
+      (match prog
+        [`(program ,stack-num ,instrs)
+         `(program ,stack-num ,(concat-map lower-condition
+                                           instrs))]))))
+
+
 
 (define lookup-variable
   (lambda (var env)
@@ -730,12 +1010,13 @@
 (define built-ins
   (map (lambda (x)
          (cons x x))
-       '(+ - read < > <= >= eq?)))
+       '(+ - read < > <= >= eq? not)))
 
 (define run-all
   (compose print-instructions
            patch-instructions
            add-bookkeeping
+           lower-conditionals
            add-register-saves
            allocate-registers
            build-interference
@@ -744,34 +1025,6 @@
            flatten
            (uniquify (u-state built-ins 0))))
 
-;; racket compiler.rkt > test.s
-;; gcc -g -std=c99 runtime.o test.s
-;; ./a.out
-
-;; (if #t
-;;     ;; (let ((test-prog '(program (let ((a 5)) a))))
-;;     (let ((test-prog '(program (if #t 1 2))))
-;;     ;; (let ((test-prog '(program (let ((x (read)))
-;;     ;;                              (let ((y (read)))
-;;     ;;                                (+ x (- y)))))))
-;;       ;; (display test-prog)
-;;       ;; (newline)
-;;       (display (run-all test-prog)))
-
-;;     (compiler-tests "r1-compiler"
-;;                     #f
-;;                     (reverse `((print-instructions  ,print-instructions               nothing)
-;;                                (patch-instructions  ,patch-instructions               nothing)
-;;                                (add-bookkeeping     ,add-bookkeeping                  nothing)
-;;                                (add-register-saves  ,add-register-saves               nothing)
-;;                                (allocate-registers  ,allocate-registers               nothing)
-;;                                (build-interference  ,build-interference               nothing)
-;;                                (uncover-live        ,uncover-live                     nothing)
-;;                                (select-instructions ,select-instructions              nothing)
-;;                                (flatten             ,flatten                          nothing)
-;;                                (uniquify            ,(uniquify (u-state built-ins 0)) nothing)))
-;;                     "r1"
-;;                     (range 1 49)))
 
 (provide make-graph
          graph-equal?
@@ -788,7 +1041,7 @@
          empty-set
          set-equal?
 
-         live-after
+         live-after-sets
 
          -->
          >>=
@@ -806,4 +1059,5 @@
          uniquify
          u-state
          built-ins
+         run-all
          )

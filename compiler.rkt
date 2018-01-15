@@ -63,7 +63,7 @@
     [(_ x func rest ...)
      (func (expand-fs x rest ...))]))
 
-;; absolutely does not need to be a macro but I am trying to get into the
+;; absolutely does not need to be a ma(+ 1cro but I am trying to get into the
 ;; holiday spirit.
 (define-syntax compose
   (syntax-rules ()
@@ -291,39 +291,43 @@
 (struct u-state
   (assoc-list curr-num))
 
+(debug-define uniquify
+  (lambda (prog)
+    (match prog
+      [`(program ,type ,instrs)
+       ((uniquify-exp (u-state built-ins 0))
+        `(program ,type ,instrs))])))
+
+
 ;; TODO make uniquify itself non-recursive to make it easier to debug
-(define uniquify
+(define uniquify-exp
   (lambda (state)
     (lambda (exp)
       (let ((assoc-list (u-state-assoc-list state))
-            (same-state-uniquify (uniquify state)))
+            (same-state-uniquify (uniquify-exp state)))
         (match exp
-          [`(program ,exps ...)
-           `(program ,(map same-state-uniquify exps))]
+          [`(program ,type ,exps ...)
+           `(program ,type ,(map same-state-uniquify exps))]
           [(? integer?) exp]
           [(? boolean?) exp]
           [(? symbol?)
            (or (variable-lookup exp assoc-list)
-               (error 'uniquify "Unbound variable: ~a" exp))]
+               (error 'uniquify-exp "Unbound variable: ~a" exp))]
           [`(if ,test ,true ,false)
            `(if ,(same-state-uniquify test)
                 ,(same-state-uniquify true)
                 ,(same-state-uniquify false))]
-          ;; [`(and ,rands ...)
-          ;;  `(and ,@(map same-state-uniquify rands))]
-          ;; [`(not ,rand)
-          ;;  `(not ,(same-state-uniquify rand))]
           [`(let ([,var ,val])
               ,body)
            (let ([new-sym (gensym)])
              `(let ([,new-sym ,(same-state-uniquify val)])
-                ,((uniquify (struct-copy u-state
+                ,((uniquify-exp (struct-copy u-state
                                          state
                                          (assoc-list (cons (cons var new-sym)
                                                            assoc-list))))
                   body)))]
           [`(,operator ,operands ...)
-           (let ((f (uniquify state)))
+           (let ((f (uniquify-exp state)))
              `(,(f operator)
                ,@(map f operands)))])))))
 
@@ -395,13 +399,14 @@
                              ,@(concat-map caddr results))))]))))
     (lambda (exp)
       (match exp
-        [`(program ,exps)
+        [`(program ,type ,exps)
          (let ((flat (map (lambda (exp)
                             (let-values ([(assignments value vars)
                                           (recur exp)])
                               `(,assignments ,value ,vars)))
                           exps)))
-           `(program ,(foldl set-insert
+           `(program ,type
+                     ,(foldl set-insert
                              '()
                              (concat-map caddr flat))
                      ,(concat-map (lambda (assgns val)
@@ -412,7 +417,18 @@
 
 (debug-define select-instructions
   (lambda (prog)
-    (letrec ((expand
+    (letrec ((expand-comparison
+              (lambda (comp arg1 arg2 var)
+                `((cmpq ,(expand arg2)
+                        ,(expand arg1))
+                  ,(match comp
+                     [`(eq? ,_ ,_) '(sete (byte-reg al))]
+                     [`(< ,_ ,_) '(setl (byte-reg al))]
+                     [`(> ,_ ,_) '(setg (byte-reg al))]
+                     [`(<= ,_ ,_) '(setle (byte-reg al))]
+                     [`(>= ,_ ,_) '(setge (byte-reg al))])
+                  (movzbq (byte-reg al) (var ,var)))))
+             (expand
               (lambda (exp)
                 (match exp
                   [(? integer?) `(int ,exp)]
@@ -443,10 +459,16 @@
                   [`(not ,val)
                    `((movq (int 1) (var ,var))
                      (xorq ,(expand val) (var ,var)))]
-                  [`(eq? ,arg1 ,arg2)
-                   `((cmpq ,(expand arg2) ,(expand arg1))
-                     (set e (byte-reg al))
-                     (movzbq (byte-reg al) ,var))]
+                  [(or `(eq? ,arg1 ,arg2)
+                       `(> ,arg1 ,arg2)
+                       `(< ,arg1 ,arg2)
+                       `(>= ,arg1 ,arg2)
+                       `(<= ,arg1 ,arg2))
+                   (expand-comparison exp arg1 arg2 var)]
+                  ;; [`(eq? ,arg1 ,arg2)
+                  ;;  `((cmpq ,(expand arg2) ,(expand arg1))
+                  ;;    (sete (byte-reg al))
+                  ;;    (movzbq (byte-reg al) (var ,var)))]
                   [val
                    `((movq ,(expand val) (var ,var)))]))))
              ;; [`(assign ,var ,val)
@@ -454,8 +476,9 @@
 
 
       (match prog
-        [`(program ,vars ,code)
-         `(program ,vars
+        [`(program ,type ,vars ,code)
+         `(program ,type
+                   ,vars
                    ,(concat-map expand code))]))))
 
         ;; [`(assign ,var (+ ,(? integer? val1) ,(? integer? val2)))
@@ -490,8 +513,9 @@
                          instrs)))))
     (lambda (prog)
       (match prog
-        [`(program ,num ,live-varss ,instrs)
-         `(program ,num
+        [`(program ,type ,num ,live-varss ,instrs)
+         `(program ,type
+                   ,num
                    ,(helper live-varss instrs))]))))
 
 ;; I should add register saves and such here. callq should save all caller save
@@ -500,7 +524,7 @@
 (debug-define add-bookkeeping
   (lambda (prog)
     (match prog
-      [`(program ,stack-num ,instrs)
+      [`(program (type ,type) ,stack-num ,instrs)
        `(program ,stack-num
                  ((pushq (reg rbp))
                   (pushq (reg rax))
@@ -508,7 +532,9 @@
                   (subq (int ,stack-num) (reg rsp))
                   ,@instrs
                   (movq (reg rax) (reg rdi))
-                  (callq print_int)
+                  ,(if (eqv? type 'Integer)
+                       `(callq print_int)
+                       `(callq print_bool))
                   (addq (int ,stack-num) (reg rsp))
                   (popq (reg rax))
                   (and (int 0) (reg rax))
@@ -557,6 +583,7 @@
                              ,@(map print-instructions insts)
                              "\n")))]
       [`(reg ,reg) (format "%~a" reg)]
+      [`(byte-reg ,reg) (format "%~a" reg)]
       [`(label ,label) (format "~a" label)]
       [`(label-pos ,label) (format "~a:" label)]
       [`(int ,num) (format "$~a" num)]
@@ -566,6 +593,8 @@
        (format "~a(%~a)" offset reg)]
       [`(jmp-if equal ,location)
        (format "	je	~a" (print-instructions location))]
+      [`(sete ,reg)
+       (format "	~a	~a" 'sete (print-instructions reg))]
       [`(,rator ,inst1 ,inst2)
        (format "	~a	~a,	~a"
                rator
@@ -601,32 +630,48 @@
         [`(callq ,_) '()]
         [(or `(addq ,_ ,_)
              `(eq? ,_ ,_)
-             `(xorq ,_ ,_))
+             `(xorq ,_ ,_)
+             `(cmpq ,_ ,_)
+             `(movzbq ,_ ,_))
          (std-two-arg-reads instr)]
         ;; [`(addq ,_ ,_) ]
         ;; [`(xorq ,_ ,_) (std-two-arg-reads instr)]
         [`(neg ,_) (std-one-arg-reads instr)]
         [`(not ,_) (std-one-arg-reads instr)]
+        [(or `(sete ,_)
+             `(setle ,_)
+             `(setge ,_)
+             `(setg ,_)
+             `(setl ,_)) '()]
         [_ (error 'get-read-vars "Unrecognized instruction: ~a" instr)]))))
 
 (define get-written-vars
   (letrec ((std-two-arg-writes
             (lambda (instr)
               (match instr
-                [`(,_ ,_ (var ,var))
-                 `(,var)]))))
+                [`(,_ ,_ (var ,var)) `(,var)]
+                [`(,_ ,_ ,_) '()]))))
     (lambda (instr)
       (match instr
         [`(movq ,_ (var ,var))
          `(,var)]
         [(or `(addq ,_ ,_)
-             `(eq? ,_ ,_))
+             `(eq? ,_ ,_)
+             `(cmpq ,_ ,_)
+             `(xorq ,_ ,_)
+             `(movzbq ,_ ,_))
          (std-two-arg-writes instr)]
         [`(callq ,_) '()]
         [`(neg (var ,var))
          `(,var)]
         [`(not (var ,var))
          `(,var)]
+        [(or `(sete ,_)
+             `(setl ,_)
+             `(setg ,_)
+             `(setge ,_)
+             `(setle ,_))
+         '()]
         [_ (error 'get-written-vars "Unrecognized instruction: ~a" instr)]))))
 
 ;; need to refactor this to actually modify the instructions instead of
@@ -713,9 +758,9 @@
 (debug-define uncover-live
   (lambda (prog)
     (match prog
-      [`(program ,x ,instrs)
+      [`(program ,type ,x ,instrs)
        ;; `(program ,(live-after-sets instrs) ,x ,instrs)])))
-       `(program ,x ,(live-after-sets instrs))])))
+       `(program ,type ,x ,(live-after-sets instrs))])))
 
 (define add-interference-edges
   (lambda (instr live-vars graph)
@@ -734,7 +779,8 @@
                   d
                   (add-nodes `(,s ,d) graph))]
       [(or `(movq ,_ (var ,d))
-           `(neg (var ,d)))
+           `(neg (var ,d))
+           `(movzbq ,_ (var ,d)))
        (add-edges (filter (lambda (v)
                             (not (eqv? v d)))
                           live-vars)
@@ -750,6 +796,13 @@
        ;;    (error 'not-yet-implemented "not yet sure what to do here")])]
       [(or `(callq ,_)
            `(movq ,_ ,_)
+           `(cmpq ,_ ,_)
+           `(xorq ,_ ,_)
+           `(sete ,_)
+           `(setl ,_)
+           `(setg ,_)
+           `(setle ,_)
+           `(setge ,_)
            `(addq ,_ ,_)
            `(eq? ,_ ,_))
        graph])))
@@ -813,8 +866,9 @@
       ;;                              live-after-list)
       ;;            ,live-after-list
       ;;            ,instrs)])))
-      [`(program ,vars ,instrs)
-       `(program ,(construct-graph instrs)
+      [`(program ,type ,vars ,instrs)
+       `(program ,type
+                 ,(construct-graph instrs)
                  ,instrs)])))
 
 (define caller-save?
@@ -870,8 +924,7 @@
               (if (null? instrs)
                   '()
                   (--> curr <- (car instrs)
-                       rest <- (rem-live-vars
-                                (cdr instrs))
+                       rest <- (rem-live-vars (cdr instrs))
                        (match curr
                          [`((if ,test
                                 ,true
@@ -882,11 +935,10 @@
                                      ,(rem-live-vars false))
                                 rest)]
                          [_ (cons (caar instrs)
-                                  (rem-live-vars
-                                   (cdr instrs)))]))))))
+                                  rest)]))))))
       (lambda (prog)
         (match prog
-          [`(program ,graph ,instrs)
+          [`(program ,type ,graph ,instrs)
            (--> get-color-var <- car
                 get-color-num <- cdr
                 colors <- (color-graph graph)
@@ -909,7 +961,8 @@
                                                                color-num))))))
                                 colors)
                 reg-map <- (make-immutable-hasheqv reg-mapping)
-                `(program ,(let ((stack-num (- (add1 num-colors)
+                `(program ,type
+                          ,(let ((stack-num (- (add1 num-colors)
                                                (length caller-save-regs))))
                              (max (* stack-num word-size) 0))
                           ,(map (lambda (vars)
@@ -945,9 +998,11 @@
                 [_ (list instr)]))))
     (lambda (prog)
       (match prog
-        [`(program ,stack-num ,instrs)
-         `(program ,stack-num ,(concat-map lower-condition
-                                           instrs))]))))
+        [`(program ,type ,stack-num ,instrs)
+         `(program ,type
+                   ,stack-num
+                   ,(concat-map lower-condition
+                                instrs))]))))
 
 
 
@@ -957,7 +1012,7 @@
 
 (define extend-env
   (lambda (var val env)
-    (cons `(,var val) env)))
+    (cons `(,var . ,val) env)))
 
 (define type-error
   (lambda (func actual expected)
@@ -971,6 +1026,18 @@
   (lambda (type)
     (eqv? type 'Boolean)))
 
+(define check-type-int
+  (lambda (type name)
+    (if (eqv? type 'Integer)
+        (void)
+        (type-error name type 'Integer))))
+
+(define check-types-equal
+  (lambda (type1 type2 name)
+    (if (not (eqv? type1 type2))
+        (type-error name type2 type1)
+        (void))))
+
 (define typecheck-R2-curry
   (lambda (env)
     (lambda (exp)
@@ -981,6 +1048,30 @@
           [(? fixnum?) 'Integer]
           [(? boolean?) 'Boolean]
           [(? symbol?) (lookup-variable exp env)]
+          [`(read)
+           'Integer]
+          [`(- ,arg)
+           (check-type-int (recur arg) '-)
+           'Integer]
+          [(or `(< ,arg1 ,arg2)
+               `(> ,arg1 ,arg2)
+               `(<= ,arg1 ,arg2)
+               `(>= ,arg1 ,arg2))
+           (check-type-int (recur arg1) 'comparison)
+           (check-type-int (recur arg2) 'comparison)
+           'Boolean]
+          [(or `(eq? ,arg1 ,arg2)
+               `(and ,arg1 ,arg2))
+           (let ((arg1-type (recur arg1))
+                 (arg2-type (recur arg2)))
+             (check-types-equal arg1-type arg2-type 'eq?)
+             'Boolean)]
+          [`(+ ,arg1 ,arg2)
+           (let ((arg1-type (recur arg1))
+                 (arg2-type (recur arg2)))
+             (check-type-int arg1-type '+)
+             (check-type-int arg2-type '+)
+             'Integer)]
           [`(not ,exp)
            (match (recur exp)
              ['Boolean 'Boolean]
@@ -989,9 +1080,12 @@
            (let ((test-type (recur test))
                  (true-type (recur true))
                  (false-type (recur false)))
-             (and (is-type-boolean? test-type)
-                  (eqv? true-type false-type)
-                  true-type))]
+             (let ((result-type (and (is-type-boolean? test-type)
+                                     (eqv? true-type false-type)
+                                     true-type)))
+               (if (not result-type)
+                   (type-error 'if result-type 'anything-else)
+                   result-type)))]
           [`(let ((,vars ,vals) ...) ,body)
            (let ((typed-pairs (map (lambda (var val)
                                      (cons var (recur val)))
@@ -999,18 +1093,18 @@
                                    vals)))
              ((typecheck-R2-curry (foldl (lambda (pair ext-env)
                                            (extend-env (car pair)
-                                                       (recur (cadr pair))
+                                                       (cdr pair)
                                                        ext-env))
                                          env
                                          typed-pairs)) body))])))))
 
-(define typecheck-R2
+(debug-define typecheck-R2
   (typecheck-R2-curry '()))
 
 (define built-ins
   (map (lambda (x)
          (cons x x))
-       '(+ - read < > <= >= eq? not)))
+       '(+ - read < > <= >= eq? and not)))
 
 (define run-all
   (compose print-instructions
@@ -1023,8 +1117,17 @@
            uncover-live
            select-instructions
            flatten
-           (uniquify (u-state built-ins 0))))
+           uniquify
+           typecheck-R2))
 
+(define run-some
+  (compose
+   (lambda (prog) (time (allocate-registers prog)))
+   (lambda (prog) (time (build-interference prog)))
+   (lambda (prog) (time (uncover-live prog)))
+   (lambda (prog) (time (select-instructions prog)))
+   (lambda (prog) (time (flatten prog)))
+   (lambda (prog) (time ((uniquify (u-state built-ins 0)) prog)))))
 
 (provide make-graph
          graph-equal?
@@ -1047,6 +1150,7 @@
          >>=
          concat-map
 
+         lower-conditionals
          print-instructions
          patch-instructions
          add-bookkeeping
@@ -1057,6 +1161,7 @@
          select-instructions
          flatten
          uniquify
+         typecheck-R2
          u-state
          built-ins
          run-all

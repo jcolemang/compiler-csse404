@@ -190,6 +190,14 @@
                  (set-singleton 'a))
    ))
 
+(display "~~~~~~~~~~~~~~~~~~~~~~~~~")
+(newline)
+(display "Running my personal tests")
+(newline)
+(display "~~~~~~~~~~~~~~~~~~~~~~~~~")
+(newline)
+
+
 (run-tests graph-tests)
 (run-tests live-after-tests)
 (run-tests my-syntax-tests)
@@ -197,32 +205,42 @@
 (run-tests set-tests)
 (run-tests interference-graph-tests)
 
+(newline)
+(display "~~~~~~~~~~~~~~~~~~~~~~~~~")
+(newline)
+(display "Running the given test cases")
+(newline)
+(display "~~~~~~~~~~~~~~~~~~~~~~~~~")
+(newline)
+
 (compiler-tests "r1-compiler"
-                #f
-                (reverse `((print-instructions  ,print-instructions               nothing)
-                           (patch-instructions  ,patch-instructions               nothing)
-                           (add-bookkeeping     ,add-bookkeeping                  nothing)
-                           (add-register-saves  ,add-register-saves               nothing)
-                           (allocate-registers  ,allocate-registers               nothing)
-                           (build-interference  ,build-interference               nothing)
-                           (uncover-live        ,uncover-live                     nothing)
-                           (select-instructions ,select-instructions              nothing)
-                           (flatten             ,flatten                          nothing)
-                           (uniquify            ,(uniquify (u-state built-ins 0)) nothing)))
+                typecheck-R2
+                (reverse `((print-instructions  ,print-instructions  nothing)
+                           (patch-instructions  ,patch-instructions  nothing)
+                           (add-bookkeeping     ,add-bookkeeping     nothing)
+                           (lower-conditionals  ,lower-conditionals  nothing)
+                           (add-register-saves  ,add-register-saves  nothing)
+                           (allocate-registers  ,allocate-registers  nothing)
+                           (build-interference  ,build-interference  nothing)
+                           (uncover-live        ,uncover-live        nothing)
+                           (select-instructions ,select-instructions nothing)
+                           (flatten             ,flatten             nothing)
+                           (uniquify            ,uniquify            nothing)))
                 "r1"
                 (range 1 49))
 
 (compiler-tests "r2-compiler"
-                #f
-                (reverse `((print-instructions  ,print-instructions               nothing)
-                           (patch-instructions  ,patch-instructions               nothing)
-                           (add-bookkeeping     ,add-bookkeeping                  nothing)
-                           (add-register-saves  ,add-register-saves               nothing)
-                           (allocate-registers  ,allocate-registers               nothing)
-                           (build-interference  ,build-interference               nothing)
-                           (uncover-live        ,uncover-live                     nothing)
-                           (select-instructions ,select-instructions              nothing)
-                           (flatten             ,flatten                          nothing)
-                           (uniquify            ,(uniquify (u-state built-ins 0)) nothing)))
+                typecheck-R2
+                (reverse `((print-instructions  ,print-instructions  nothing)
+                           (patch-instructions  ,patch-instructions  nothing)
+                           (add-bookkeeping     ,add-bookkeeping     nothing)
+                           (lower-conditionals  ,lower-conditionals  nothing)
+                           (add-register-saves  ,add-register-saves  nothing)
+                           (allocate-registers  ,allocate-registers  nothing)
+                           (build-interference  ,build-interference  nothing)
+                           (uncover-live        ,uncover-live        nothing)
+                           (select-instructions ,select-instructions nothing)
+                           (flatten             ,flatten             nothing)
+                           (uniquify            ,uniquify            nothing)))
                 "r2"
                 (range 1 60))

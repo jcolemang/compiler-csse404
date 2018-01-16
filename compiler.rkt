@@ -295,108 +295,145 @@
   (lambda (prog)
     (match prog
       [`(program ,type ,instrs)
-       ((uniquify-exp (u-state built-ins 0))
-        `(program ,type ,instrs))])))
+       `(program ,type
+                 ,(map (uniquify-exp (u-state built-ins 0)) instrs))])))
 
+(define type-and-exp
+  (lambda (exp)
+    (match exp
+      [`(has-type ,exp ,type)
+       (values exp type)])))
 
-;; TODO make uniquify itself non-recursive to make it easier to debug
 (define uniquify-exp
   (lambda (state)
-    (lambda (exp)
-      (let ((assoc-list (u-state-assoc-list state))
-            (same-state-uniquify (uniquify-exp state)))
-        (match exp
-          [`(program ,type ,exps ...)
-           `(program ,type ,(map same-state-uniquify exps))]
-          [(? integer?) exp]
-          [(? boolean?) exp]
-          [(? symbol?)
-           (or (variable-lookup exp assoc-list)
-               (error 'uniquify-exp "Unbound variable: ~a" exp))]
-          [`(if ,test ,true ,false)
-           `(if ,(same-state-uniquify test)
-                ,(same-state-uniquify true)
-                ,(same-state-uniquify false))]
-          [`(let ([,var ,val])
-              ,body)
-           (let ([new-sym (gensym)])
-             `(let ([,new-sym ,(same-state-uniquify val)])
-                ,((uniquify-exp (struct-copy u-state
-                                         state
-                                         (assoc-list (cons (cons var new-sym)
-                                                           assoc-list))))
-                  body)))]
-          [`(,operator ,operands ...)
-           (let ((f (uniquify-exp state)))
-             `(,(f operator)
-               ,@(map f operands)))])))))
+    (lambda (typed-exp)
+      (let-values ([(exp type)
+                    (type-and-exp typed-exp)])
+        (let ((assoc-list (u-state-assoc-list state))
+              (same-state-uniquify (uniquify-exp state)))
+          `(has-type ,(match exp
+                        ;; [`(program ,type ,exps ...)
+                        ;;  `(program ,type ,(map same-state-uniquify exps))]
+                        [(? integer?) exp]
+                        [(? boolean?) exp]
+                        [`(has-type ,var built-in)
+                         `(has-type ,var built-in)]
+                        [(? symbol?)
+                         (or (variable-lookup exp assoc-list)
+                             (error 'uniquify-exp "Unbound variable: ~a" exp))]
+                        [`(if ,test ,true ,false)
+                         `(if ,(same-state-uniquify test)
+                              ,(same-state-uniquify true)
+                              ,(same-state-uniquify false))]
+                        [`(let ([,var ,val])
+                            ,body)
+                         (let ([new-sym (gensym)])
+                           `(let ([,new-sym ,(same-state-uniquify val)])
+                              ,((uniquify-exp
+                                 (struct-copy u-state
+                                              state
+                                              (assoc-list (cons (cons var
+                                                                      new-sym)
+                                                                assoc-list))))
+                                body)))]
+                        [`(,operator ,operands ...)
+                         (let ((f (uniquify-exp state)))
+                           `(,(f operator)
+                             ,@(map f operands)))])
+                     ,type))))))
 
-;; (define flatten
 (debug-define flatten
   (letrec ((recur
-            (lambda (exp)
-              (match exp
-                [(? integer?)
-                 (values '() exp '())]
-                [(? boolean?)
-                 (values '() exp '())]
-                [(? symbol?)
-                 (values '() exp `(,exp))]
-                [`(let ((,x ,assgn)) ,body)
-                 (let-values ([(assgn-assignments assgn-value assgn-vars)
-                               (recur assgn)]
-                              [(body-assignments body-value body-vars)
-                               (recur body)])
-                   (values `(,@assgn-assignments
-                             (assign ,x ,assgn-value)
-                             ,@body-assignments)
-                           body-value
-                           `(,@assgn-vars
-                             ,@body-vars
-                             ,x)))]
-                [`(if ,test ,true ,false)
-                 (let-values ([(test-assgns test-value test-vars)
-                               (recur test)]
-                              [(true-assgns true-value true-vars)
-                               (recur true)]
-                              [(false-assgns false-value false-vars)
-                               (recur false)])
-                   (let ((if-var (gensym)))
-                     (values `(,@test-assgns
-                               (if (eq? #t ,test-value)
-                                   (,@true-assgns
-                                    (assign ,if-var ,true-value))
-                                   (,@false-assgns
-                                    (assign ,if-var ,false-value))))
-                             if-var
-                             (append test-vars true-vars false-vars))))]
-                [`(and ,rands ...)
-                 (match rands
-                   [`()
-                    (values '() #t '())]
-                   [`(,rand ,rest ...)
-                    (recur `(if ,rand
-                                (and ,@rest)
-                                #f))])]
-                [`(,rator ,(? integer? x) ...)
-                 (let ((new-sym (gensym)))
-                   (values `((assign ,new-sym ,exp))
-                           new-sym
-                           `(,new-sym)))]
-                [`(,rator ,rands ...)
-                 (let ((results (map (lambda (exp)
-                                       (let-values ([(assignments value vars)
-                                                     (recur exp)])
-                                         `(,assignments
-                                           ,value
-                                           ,vars)))
-                                     rands))
-                       (new-sym (gensym)))
-                   (values `(,@(concat-map car results)
-                             (assign ,new-sym (,rator ,@(map cadr results))))
-                           new-sym
-                           `(,new-sym
-                             ,@(concat-map caddr results))))]))))
+            (lambda (typed-exp)
+              (let-values ([(exp type)
+                            (type-and-exp typed-exp)])
+                (match exp
+                  [(? integer?)
+                   (values '() exp '())]
+                  [(? boolean?)
+                   (values '() exp '())]
+                  [(? symbol?)
+                   (values '() exp `((,exp . type)))]
+                  [`(let ((,x ,assgn)) ,body)
+                   (let-values ([(assgn-assignments assgn-value assgn-vars)
+                                 (recur assgn)]
+                                [(body-assignments body-value body-vars)
+                                 (recur body)])
+                     (values `(,@assgn-assignments
+                               (assign ,x ,assgn-value)
+                               ,@body-assignments)
+                             body-value
+                             `(,@assgn-vars
+                               ,@body-vars
+                               ,x)))]
+                  [`(if ,test ,true ,false)
+                   (let-values ([(test-assgns test-value test-vars)
+                                 (recur test)]
+                                [(true-assgns true-value true-vars)
+                                 (recur true)]
+                                [(false-assgns false-value false-vars)
+                                 (recur false)])
+                     (let ((if-var (gensym)))
+                       (values `(,@test-assgns
+                                 (if (eq? #t ,test-value)
+                                     (,@true-assgns
+                                      (assign ,if-var ,true-value))
+                                     (,@false-assgns
+                                      (assign ,if-var ,false-value))))
+                               if-var
+                               (append test-vars true-vars false-vars))))]
+                  [`((has-type and built-in) ,rands ...)
+                   (match rands
+                     [`()
+                      (values '() #t '())]
+                     [`(,rand ,rest ...)
+                      (recur `(has-type (if ,rand
+                                            (has-type ((has-type and built-in)
+                                                       ,@rest)
+                                                      Boolean)
+                                            (has-type #f Boolean))
+                                        Boolean))])]
+                  [`((has-type ,rator built-in) ,rands ...)
+                   (let ((results (map (lambda (exp)
+                                         (let-values ([(assignments value vars)
+                                                       (recur exp)])
+                                           `(,assignments
+                                             ,value
+                                             ,vars)))
+                                       rands))
+                         (exp-result (gensym)))
+                     (values `(,@(concat-map car results)
+                               (assign ,exp-result (,rator ,@(map cadr results))))
+                             exp-result
+                             `(,exp-result
+                               ,@(concat-map caddr results))))]
+                  [`(,rator ,(? integer? x) ...)
+                   (let ((new-sym (gensym)))
+                     (values `((assign ,new-sym ,exp))
+                             new-sym
+                             `(,new-sym)))]
+                  [`(,rator ,rands ...)
+                   (let-values ([(results)
+                                 (map (lambda (exp)
+                                        (let-values ([(assignments value vars)
+                                                      (recur exp)])
+                                          `(,assignments
+                                            ,value
+                                            ,vars)))
+                                      rands)]
+                                [(rator-assgns rator-value rator-vars)
+                                 (recur rator)]
+                                [(result-var) (gensym)]
+                                [(rator-result) (gensym)])
+                     (values `(,@(concat-map car results)
+                               ,@rator-assgns
+                               (assign ,rator-result ,rator-value)
+                               (assign ,result-var (,rator-result
+                                                    ,@(map cadr results))))
+                             result-var
+                             `(,rator-result
+                               ,result-var
+                               ,@(concat-map caddr results))))])))))
     (lambda (exp)
       (match exp
         [`(program ,type ,exps)
@@ -1014,14 +1051,6 @@
   (lambda (var val env)
     (cons `(,var . ,val) env)))
 
-(define type-error
-  (lambda (func actual expected)
-    (error func
-           "Type error in ~a: Expected type was ~a, but got ~a"
-           func
-           expected
-           actual)))
-
 (define is-type-boolean?
   (lambda (type)
     (eqv? type 'Boolean)))
@@ -1038,68 +1067,139 @@
         (type-error name type2 type1)
         (void))))
 
-(define typecheck-R2-curry
+(define type-error
+  (lambda (func actual expected)
+    (error func
+           "Type error in ~a: Expected type was ~a, but got ~a"
+           func
+           expected
+           actual)))
+
+(define typecheck-R3-curry
   (lambda (env)
     (lambda (exp)
-      (let ((recur (typecheck-R2-curry env)))
+      (let ((recur (typecheck-R3-curry env)))
         (match exp
-          [`(program ,body)
-           `(program (type ,(recur body)) ,body)]
-          [(? fixnum?) 'Integer]
-          [(? boolean?) 'Boolean]
-          [(? symbol?) (lookup-variable exp env)]
+          [`(program ,bodies ... ,last-body)
+           (let ((typed-bodies (map recur bodies)))
+             (match (recur last-body)
+               [`(has-type ,typed-body ,type)
+                `(program (type ,type)
+                          (,@typed-bodies
+                           (has-type ,typed-body ,type)))]))]
+          [(? fixnum?)
+           `(has-type ,exp Integer)]
+          [(? boolean?)
+           `(has-type ,exp Boolean)]
+          [(? symbol?)
+           `(has-type ,exp ,(lookup-variable exp env))]
           [`(read)
-           'Integer]
+           `(has-type ((has-type read built-in)) Integer)]
           [`(- ,arg)
-           (check-type-int (recur arg) '-)
-           'Integer]
-          [(or `(< ,arg1 ,arg2)
-               `(> ,arg1 ,arg2)
-               `(<= ,arg1 ,arg2)
-               `(>= ,arg1 ,arg2))
-           (check-type-int (recur arg1) 'comparison)
-           (check-type-int (recur arg2) 'comparison)
-           'Boolean]
-          [(or `(eq? ,arg1 ,arg2)
-               `(and ,arg1 ,arg2))
-           (let ((arg1-type (recur arg1))
-                 (arg2-type (recur arg2)))
-             (check-types-equal arg1-type arg2-type 'eq?)
-             'Boolean)]
+           (match (recur arg)
+             [`(has-type ,typed-arg Integer)
+              `(has-type ((has-type - built-in)
+                          (has-type ,typed-arg Integer))
+                         Integer)]
+             [`(has-type ,typed-arg ,bad-type)
+              (type-error '- bad-type 'Integer)])]
+          [`(,(and (or '< '> '<= '>=)
+                   op) ,arg1 ,arg2)
+           (match `(,(recur arg1) ,(recur arg2))
+             [`((has-type ,typed-arg1 Integer)
+                (has-type ,typed-arg2 Integer))
+              `(has-type ((has-type ,op built-in)
+                          (has-type ,typed-arg1 Integer)
+                          (has-type ,typed-arg2 Integer))
+                         Boolean)]
+             [`((has-type ,_ ,bad-arg1-type)
+                (has-type ,_ ,bad-arg2-type))
+              (type-error op
+                          `(,bad-arg1-type ,bad-arg2-type)
+                          `(Integer Integer))])]
+          [`(,(and (or 'and)
+                   rator)
+             ,arg1
+             ,arg2)
+           (match `(,(recur arg1)
+                    ,(recur arg2))
+             [`((has-type ,typed-arg1 Boolean)
+                (has-type ,typed-arg2 Boolean))
+              `(has-type ((has-type ,rator built-in)
+                          (has-type ,typed-arg1 Boolean)
+                          (has-type ,typed-arg2 Boolean))
+                         Boolean)])]
+          [`(,(and (or 'eq?)
+                   rator)
+             ,arg1
+             ,arg2)
+           (match `(,(recur arg1)
+                    ,(recur arg2))
+             [`((has-type ,typed-arg1 ,type)
+                (has-type ,typed-arg2 ,type))
+              `(has-type ((has-type ,rator built-in)
+                          (has-type ,typed-arg1 ,type)
+                          (has-type ,typed-arg2 ,type))
+                         Boolean)])]
+           ;; (let ((arg1-type (recur arg1))
+           ;;       (arg2-type (recur arg2)))
+           ;;   (check-types-equal arg1-type arg2-type 'eq?)
+           ;;   'Boolean)]
           [`(+ ,arg1 ,arg2)
-           (let ((arg1-type (recur arg1))
-                 (arg2-type (recur arg2)))
-             (check-type-int arg1-type '+)
-             (check-type-int arg2-type '+)
-             'Integer)]
+           (match `(,(recur arg1)
+                    ,(recur arg2))
+             [`((has-type ,typed-arg1 Integer)
+                (has-type ,typed-arg2 Integer))
+              `(has-type ((has-type + built-in)
+                          (has-type ,typed-arg1 Integer)
+                          (has-type ,typed-arg2 Integer))
+                         Integer)]
+             [`((has-type ,_ ,bad-arg1-type)
+                (has-type ,_ ,bad-arg2-type))
+              (type-error '+
+                          `(,bad-arg1-type ,bad-arg2-type)
+                          `(Integer Integer))])]
           [`(not ,exp)
            (match (recur exp)
-             ['Boolean 'Boolean]
-             [type (type-error 'not type 'Boolean)])]
+             [`(has-type ,typed-exp Boolean)
+              `(has-type ((has-type not built-in) (has-type ,typed-exp Boolean)) Boolean)])]
           [`(if ,test ,true ,false)
-           (let ((test-type (recur test))
-                 (true-type (recur true))
-                 (false-type (recur false)))
-             (let ((result-type (and (is-type-boolean? test-type)
-                                     (eqv? true-type false-type)
-                                     true-type)))
-               (if (not result-type)
-                   (type-error 'if result-type 'anything-else)
-                   result-type)))]
+           (let ((test-typed (recur test))
+                 (true-typed (recur true))
+                 (false-typed (recur false)))
+             (match `(,test-typed
+                      ,true-typed
+                      ,false-typed)
+               [`((has-type ,_ Boolean)
+                  (has-type ,_ ,branch-type)
+                  (has-type ,_ ,branch-type))
+                `(has-type (if ,test-typed
+                               ,true-typed
+                               ,false-typed)
+                           ,branch-type)]))]
           [`(let ((,vars ,vals) ...) ,body)
-           (let ((typed-pairs (map (lambda (var val)
-                                     (cons var (recur val)))
-                                   vars
-                                   vals)))
-             ((typecheck-R2-curry (foldl (lambda (pair ext-env)
-                                           (extend-env (car pair)
-                                                       (cdr pair)
-                                                       ext-env))
-                                         env
-                                         typed-pairs)) body))])))))
+           (--> typed-pairs <- (map (lambda (var val)
+                                      (list var (recur val)))
+                                    vars
+                                    vals)
+                typed-body <- ((typecheck-R3-curry (foldl (lambda (pair ext-env)
+                                                            (extend-env (car pair)
+                                                                        (match (cadr pair)
+                                                                          [`(has-type ,_
+                                                                                      ,type)
+                                                                           type])
+                                                                        ext-env))
+                                                          env
+                                                          typed-pairs))
+                               body)
+                (match typed-body
+                  [`(has-type ,_ ,type)
+                   `(has-type (let ,typed-pairs
+                                ,typed-body)
+                              ,type)]))])))))
 
-(debug-define typecheck-R2
-  (typecheck-R2-curry '()))
+(debug-define typecheck-R3
+  (typecheck-R3-curry '()))
 
 (define built-ins
   (map (lambda (x)
@@ -1118,7 +1218,7 @@
            select-instructions
            flatten
            uniquify
-           typecheck-R2))
+           typecheck-R3))
 
 (define run-some
   (compose
@@ -1161,7 +1261,7 @@
          select-instructions
          flatten
          uniquify
-         typecheck-R2
+         typecheck-R3
          u-state
          built-ins
          run-all

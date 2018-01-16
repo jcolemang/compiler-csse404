@@ -213,9 +213,7 @@
 (display "~~~~~~~~~~~~~~~~~~~~~~~~~")
 (newline)
 
-(compiler-tests "r1-compiler"
-                typecheck-R2
-                (reverse `((print-instructions  ,print-instructions  nothing)
+(let ((compiler (reverse `((print-instructions  ,print-instructions  nothing)
                            (patch-instructions  ,patch-instructions  nothing)
                            (add-bookkeeping     ,add-bookkeeping     nothing)
                            (lower-conditionals  ,lower-conditionals  nothing)
@@ -225,22 +223,21 @@
                            (uncover-live        ,uncover-live        nothing)
                            (select-instructions ,select-instructions nothing)
                            (flatten             ,flatten             nothing)
-                           (uniquify            ,uniquify            nothing)))
-                "r1"
-                (range 1 49))
+                           (uniquify            ,uniquify            nothing))))
+      (type-checker typecheck-R3))
+  (compiler-tests "r1-compiler"
+                  type-checker
+                  compiler
+                  "r1"
+                  (range 1 49))
+  (compiler-tests "r2-compiler"
+                  type-checker
+                  compiler
+                  "r2"
+                  (range 1 60))
 
-(compiler-tests "r2-compiler"
-                typecheck-R2
-                (reverse `((print-instructions  ,print-instructions  nothing)
-                           (patch-instructions  ,patch-instructions  nothing)
-                           (add-bookkeeping     ,add-bookkeeping     nothing)
-                           (lower-conditionals  ,lower-conditionals  nothing)
-                           (add-register-saves  ,add-register-saves  nothing)
-                           (allocate-registers  ,allocate-registers  nothing)
-                           (build-interference  ,build-interference  nothing)
-                           (uncover-live        ,uncover-live        nothing)
-                           (select-instructions ,select-instructions nothing)
-                           (flatten             ,flatten             nothing)
-                           (uniquify            ,uniquify            nothing)))
-                "r2"
-                (range 1 60))
+  (compiler-tests "r3-compiler"
+                  type-checker
+                  compiler
+                  "r3"
+                  (range 1 36)))

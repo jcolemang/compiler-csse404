@@ -1,3 +1,4 @@
 tests/*.s
 tests/*.in
+*.o
 debugging-tests.rkt

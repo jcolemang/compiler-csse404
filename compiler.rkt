@@ -353,7 +353,7 @@
                   [(? boolean?)
                    (values '() exp '())]
                   [(? symbol?)
-                   (values '() exp `((,exp . type)))]
+                   (values '() exp `((,exp . ,type)))]
                   [`(let ((,x ,assgn)) ,body)
                    (let-values ([(assgn-assignments assgn-value assgn-vars)
                                  (recur assgn)]
@@ -365,7 +365,9 @@
                              body-value
                              `(,@assgn-vars
                                ,@body-vars
-                               ,x)))]
+                               (,x . ,(match assgn
+                                        [`(has-type ,_ ,assgn-type)
+                                         assgn-type])))))]
                   [`(if ,test ,true ,false)
                    (let-values ([(test-assgns test-value test-vars)
                                  (recur test)]

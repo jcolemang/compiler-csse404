@@ -19,7 +19,7 @@
 
 ;; My helpers
 
-(define-for-syntax DEBUGGING #f)
+(define-for-syntax DEBUGGING #t)
 
 (define-syntax debug-define
   (lambda (exp)
@@ -342,6 +342,89 @@
                              ,@(map f operands)))])
                      ,type))))))
 
+(debug-define expose-allocation
+  (letrec ((let-nester
+            (lambda (ided-typed-exps to-nest vec-addr curr-idx vec-type vec-len)
+              (if (null? ided-typed-exps)
+                  (let ((num-bytes (+ 8 (* vec-len 8))))
+                    `(has-type (let ([,(gensym 'should-collect)
+                                      (has-type (if (has-type ((has-type < built-in)
+                                                               (has-type ((has-type + built-in)
+                                                                          (has-type (global-value free_ptr) Integer)
+                                                                          (has-type ,num-bytes Integer))
+                                                                         Integer)
+                                                               (has-type (global-value fromspace_end) Integer))
+                                                              Boolean)
+                                                    (has-type ((has-type void built-in)) Void)
+                                                    (has-type ((has-type collect built-in)
+                                                               (has-type ,num-bytes Integer)) Void))
+                                                Void)])
+                                 (has-type (let ([,vec-addr (has-type (allocate ,vec-len ,vec-type) ,vec-type)])
+                                             ,to-nest)
+                                           ,vec-type))
+                               ,vec-type))
+                  (--> curr <- (car ided-typed-exps)
+                       id <- (car curr)
+                       typed-exp <- (cdr curr)
+                       `(has-type (let ([,id ,typed-exp])
+                                    ,(let-nester (cdr ided-typed-exps)
+                                                 `(has-type (let ([,(gensym 'vec-index)
+                                                                   (has-type
+                                                                    ((has-type vector-set! built-in)
+                                                                     (has-type ,vec-addr
+                                                                               ,vec-type)
+                                                                     (has-type ,curr-idx
+                                                                               Integer)
+                                                                     (has-type ,id
+                                                                               ,(caddr typed-exp)))
+                                                                    Void)])
+                                                              ,to-nest)
+                                                            ,vec-type)
+                                                 vec-addr
+                                                 (add1 curr-idx)
+                                                 vec-type
+                                                 vec-len))
+                                  ,vec-type)))))
+           (expose-helper
+            (lambda (typed-exp)
+              (match typed-exp
+                [(or `(has-type ,_ built-in)
+                     `(has-type ,(? integer?) Integer)
+                     `(has-type ,(? symbol?) ,_)
+                     `(has-type ,(? boolean?) Boolean))
+                 typed-exp]
+                [`(has-type ((has-type vector ,_) ,typed-exps ...) ,type)
+                 (--> ided-typed-exps <- (map (lambda (typed-exp)
+                                                (cons (gensym)
+                                                      (expose-helper typed-exp)))
+                                              typed-exps)
+                      vector-addr <- (gensym)
+                      vector-len <- (length typed-exps)
+                      (let-nester ided-typed-exps
+                                  `(has-type ,vector-addr ,type)
+                                  vector-addr
+                                  0
+                                  type
+                                  vector-len))]
+                [`(has-type (let ((,sym ,exp)) ,body) ,type)
+                 `(has-type (let ((,sym ,(expose-helper exp)))
+                              ,(expose-helper body))
+                            ,type)]
+                [`(has-type (if ,test ,true ,false) ,type)
+                 `(has-type (if ,(expose-helper test)
+                                ,(expose-helper true)
+                                ,(expose-helper false))
+                            ,type)]
+                [`(has-type (,exps ...) ,type)
+                 `(has-type ,(map expose-helper exps) ,type)]))))
+    (lambda (prog)
+      (match prog
+        [`(program ,output-type
+                   ,exps)
+         `(program ,output-type
+                   ,(map expose-helper exps))]))))
+
+
 (debug-define flatten
   (letrec ((recur
             (lambda (typed-exp)
@@ -354,6 +437,8 @@
                    (values '() exp '())]
                   [(? symbol?)
                    (values '() exp `((,exp . ,type)))]
+                  [`(allocate ,bytes ,type)
+                   (values '() exp '())]
                   [`(let ((,x ,assgn)) ,body)
                    (let-values ([(assgn-assignments assgn-value assgn-vars)
                                  (recur assgn)]
@@ -375,7 +460,7 @@
                                  (recur true)]
                                 [(false-assgns false-value false-vars)
                                  (recur false)])
-                     (let ((if-var (gensym)))
+                     (let ((if-var (gensym 'if-var)))
                        (values `(,@test-assgns
                                  (if (eq? #t ,test-value)
                                      (,@true-assgns
@@ -383,7 +468,15 @@
                                      (,@false-assgns
                                       (assign ,if-var ,false-value))))
                                if-var
-                               (append test-vars true-vars false-vars))))]
+                               (append `((,if-var . ,type))
+                                       test-vars
+                                       true-vars
+                                       false-vars))))]
+                  [`(global-value ,name)
+                   (let ((global-val-var (gensym 'global-val-var)))
+                     (values `((assign ,global-val-var ,exp))
+                             global-val-var
+                             `((,global-val-var . Integer))))]
                   [`((has-type and built-in) ,rands ...)
                    (match rands
                      [`()
@@ -403,17 +496,17 @@
                                              ,value
                                              ,vars)))
                                        rands))
-                         (exp-result (gensym)))
+                         (exp-result (gensym 'app-return)))
                      (values `(,@(concat-map car results)
                                (assign ,exp-result (,rator ,@(map cadr results))))
                              exp-result
-                             `(,exp-result
+                             `((,exp-result . ,type)
                                ,@(concat-map caddr results))))]
                   [`(,rator ,(? integer? x) ...)
-                   (let ((new-sym (gensym)))
+                   (let ((new-sym (gensym 'app-return-int)))
                      (values `((assign ,new-sym ,exp))
                              new-sym
-                             `(,new-sym)))]
+                             `((,new-sym . ,type))))]
                   [`(,rator ,rands ...)
                    (let-values ([(results)
                                  (map (lambda (exp)
@@ -425,8 +518,8 @@
                                       rands)]
                                 [(rator-assgns rator-value rator-vars)
                                  (recur rator)]
-                                [(result-var) (gensym)]
-                                [(rator-result) (gensym)])
+                                [(result-var) (gensym 'result-var)]
+                                [(rator-result) (gensym 'rator-result)])
                      (values `(,@(concat-map car results)
                                ,@rator-assgns
                                (assign ,rator-result ,rator-value)
@@ -1097,6 +1190,40 @@
            `(has-type ,exp ,(lookup-variable exp env))]
           [`(read)
            `(has-type ((has-type read built-in)) Integer)]
+          [`(vector ,xs ...)
+           (let ((xs-typed (map recur xs)))
+             `(has-type ((has-type vector built-in)
+                         ,@xs-typed)
+                        (Vector ,@(map caddr xs-typed))))]
+          [`(vector-ref ,vec-exp ,(? exact-nonnegative-integer? idx))
+           (let ((typed-vec-exp (recur vec-exp))
+                 (typed-idx-exp `(has-type ,idx Integer)))
+             (match typed-vec-exp
+               [`(has-type ,_ (Vector ,vec-types ...))
+                (if (< idx (length vec-types))
+                    `(has-type ((has-type vector-ref built-in)
+                                ,typed-vec-exp
+                                ,typed-idx-exp)
+                               ,(list-ref vec-types idx))
+                    (type-error 'vector-ref vec-types 'too-long))]
+               [_ (type-error 'vector
+                              (caddr typed-vec-exp)
+                              'Vector-something)]))]
+          [`(vector-set! ,vec ,(? exact-nonnegative-integer? idx) ,exp)
+           (let ((typed-vec-exp (recur vec))
+                 (typed-val-exp (recur exp)))
+             (match `(,typed-vec-exp ,typed-val-exp)
+               [`((has-type ,_ (Vector ,vec-types ...))
+                  (has-type ,_ ,exp-type))
+                (if (and (< idx (length vec-types))
+                         (eqv? exp-type (list-ref vec-types idx)))
+                    `(has-type (vector-set! ,typed-vec-exp
+                                            (has-type ,idx Integer)
+                                            ,typed-val-exp)
+                               Void)
+                    (type-error 'vector-set! 'some-issue 'no-issue))]
+               [_ (type-error 'vector-set! 'idk-man 'something-good)]))]
+
           [`(- ,arg)
            (match (recur arg)
              [`(has-type ,typed-arg Integer)
@@ -1206,7 +1333,7 @@
 (define built-ins
   (map (lambda (x)
          (cons x x))
-       '(+ - read < > <= >= eq? and not)))
+       '(+ - read < > <= >= eq? and not void vector-set! vector vector-ref)))
 
 (define run-all
   (compose print-instructions
@@ -1219,6 +1346,7 @@
            uncover-live
            select-instructions
            flatten
+           expose-allocation
            uniquify
            typecheck-R3))
 

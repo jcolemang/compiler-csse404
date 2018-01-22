@@ -1,5 +1,4 @@
 tests/*.s
 tests/*.in
 *.o
-debugging-tests.rkt
 a.out

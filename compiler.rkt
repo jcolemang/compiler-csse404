@@ -1,5 +1,7 @@
 #lang racket
 
+;; TODO fix register allocation maybe? Theres just a bug somewhere......
+
 ;; NOTE Look into using basic blocks in the compiler
 
 ;; NOTE Look into the differences between generational garbage collecting and
@@ -14,12 +16,14 @@
 ;; interpret these and act recursively on the if statements as well.
 
 
+
+
 (require "utilities.rkt")
 (require racket/trace)
 
 ;; My helpers
 
-(define-for-syntax DEBUGGING #t)
+(define-for-syntax DEBUGGING #f)
 
 (define-syntax debug-define
   (lambda (exp)
@@ -481,6 +485,10 @@
                                                       Boolean)
                                             (has-type #f Boolean))
                                         Boolean))])]
+                  [`((has-type collect built-in) (has-type ,bytes Integer))
+                   (values `((collect (int ,bytes)))
+                           `(void)
+                           '())]
                   [`((has-type ,rator built-in) ,rands ...)
                    (let ((results (map (lambda (exp)
                                          (let-values ([(assignments value vars)
@@ -596,7 +604,7 @@
                    `((movq (var ,vec) (reg r11))
                      (movq (deref r11 ,(* 8 (add1 idx))) ,(expand var)))]
                   [`(global-value ,global-val)
-                   `((movq ,global-val ,(expand var)))]
+                   `((movq (global-value ,global-val) ,(expand var)))]
                   [`(allocate ,len (Vector ,vec-types ...))
                    (let ((tag (bitwise-ior (arithmetic-shift
                                             (foldl (lambda (if-vec accum)
@@ -608,6 +616,7 @@
                                                             [_ 0]))
                                                         vec-types))
                                             7)
+                                           1
                                            (arithmetic-shift (length vec-types)
                                                              1)))
                          (bytes-allocated (* 8 (add1 (length vec-types)))))
@@ -672,11 +681,19 @@
     (match prog
       [`(program (type ,type) ,stack-num ,instrs)
        `(program ,stack-num
-                 ((pushq (reg rbp))
+                 ((label-pos prelude)
+                  (pushq (reg rbp))
                   (pushq (reg rax))
                   (movq (reg rsp) (reg rbp))
                   (subq (int ,stack-num) (reg rsp))
+                  (movq (int 16384) (reg rdi))
+                  (movq (int 16384) (reg rsi))
+                  (callq initialize)
+                  (movq (global-value rootstack_begin) (reg r15))
+                  (movq (int 0) (deref r15 0))
+                  (label-pos endprelude)
                   ,@instrs
+                  (label-pos conclusion)
                   (movq (reg rax) (reg rdi))
                   ,(if (eqv? type 'Integer)
                        `(callq print_int)
@@ -734,6 +751,8 @@
       [`(bool #f) (format "$0")]
       [`(deref ,reg ,offset)
        (format "~a(%~a)" offset reg)]
+      [`(global-value ,global-value)
+       (format "~a(%rip)" global-value)]
       [`(jmp-if equal ,location)
        (format "	je	~a" (print-instructions location))]
       [`(sete ,reg)
@@ -978,6 +997,7 @@
       ['r11 #t]
       [_   #f])))
 
+;; I don't actually know what r11 is for, but see 5.3.3 for info
 (define caller-save-regs
   '(rdx
     rcx
@@ -989,6 +1009,7 @@
     ;; r11
     ))
 
+;; r15 is the top of the root stack
 (define callee-save-regs
   '(rbx
     r12

@@ -63,7 +63,7 @@
     [(_ x func rest ...)
      (func (expand-fs x rest ...))]))
 
-;; absolutely does not need to be a ma(+ 1cro but I am trying to get into the
+;; absolutely does not need to be a macro but I am trying to get into the
 ;; holiday spirit.
 (define-syntax compose
   (syntax-rules ()
@@ -209,11 +209,6 @@
            (get-saturation
             (lambda (node graph node-colors)
               (length (get-impossible-colors node))))
-
-              ;; (foldl + 0 (map (lambda (x)
-              ;;                   (let ((color-node (hash-ref node-colors x)))
-              ;;                     (if (get-color color-node) 1 0)))
-              ;;                 (adjacent (get-id node) graph)))))
            (get-max-saturated-node
             (lambda (graph uncolored node-colors)
               (let ((max-sat
@@ -312,8 +307,6 @@
         (let ((assoc-list (u-state-assoc-list state))
               (same-state-uniquify (uniquify-exp state)))
           `(has-type ,(match exp
-                        ;; [`(program ,type ,exps ...)
-                        ;;  `(program ,type ,(map same-state-uniquify exps))]
                         [(? integer?) exp]
                         [(? boolean?) exp]
                         [`(has-type ,var built-in)
@@ -570,6 +563,10 @@
                    (expand-into-var val var)]
                   [`(eq? ,exp1 ,exp2)
                    `(eq? ,(expand exp1) ,(expand exp2))]
+                  [`(collect ,num-bytes)
+                   `((movq (reg r15) (reg rdi))
+                     (movq ,num-bytes (reg rsi))
+                     (callq collect))]
                   [`(if ,test ,true ,false)
                    `((if ,(expand test)
                          ,(concat-map expand true)
@@ -591,31 +588,48 @@
                   [`(not ,val)
                    `((movq (int 1) (var ,var))
                      (xorq ,(expand val) (var ,var)))]
+                  [`(vector-set! ,vector ,idx ,value)
+                   `((movq (var ,vector) (reg r11))
+                     (movq ,(expand value) (deref r11 ,(* 8 (add1 idx))))
+                     (movq (int 0) (var ,var)))]
+                  [`(vector-ref ,vec ,idx)
+                   `((movq (var ,vec) (reg r11))
+                     (movq (deref r11 ,(* 8 (add1 idx))) ,(expand var)))]
+                  [`(global-value ,global-val)
+                   `((movq ,global-val ,(expand var)))]
+                  [`(allocate ,len (Vector ,vec-types ...))
+                   (let ((tag (bitwise-ior (arithmetic-shift
+                                            (foldl (lambda (if-vec accum)
+                                                     (+ if-vec (* 2 accum)))
+                                                   0
+                                                   (map (lambda (type)
+                                                          (match type
+                                                            [`(Vector ,_ ...) 1]
+                                                            [_ 0]))
+                                                        vec-types))
+                                            7)
+                                           (arithmetic-shift (length vec-types)
+                                                             1)))
+                         (bytes-allocated (* 8 (add1 (length vec-types)))))
+                     `((movq (global-value free_ptr) ,(expand var))
+                       (addq (int ,bytes-allocated) (global-value free_ptr))
+                       (movq ,(expand var) (reg r11))
+                       (movq (int ,tag) (deref r11 0))))]
+                  [`(void)
+                   `((movq (int 0) ,(expand var)))]
                   [(or `(eq? ,arg1 ,arg2)
                        `(> ,arg1 ,arg2)
                        `(< ,arg1 ,arg2)
                        `(>= ,arg1 ,arg2)
                        `(<= ,arg1 ,arg2))
                    (expand-comparison exp arg1 arg2 var)]
-                  ;; [`(eq? ,arg1 ,arg2)
-                  ;;  `((cmpq ,(expand arg2) ,(expand arg1))
-                  ;;    (sete (byte-reg al))
-                  ;;    (movzbq (byte-reg al) (var ,var)))]
                   [val
                    `((movq ,(expand val) (var ,var)))]))))
-             ;; [`(assign ,var ,val)
-             ;;  `((movq ,(expand val) (var ,var)))])))
-
-
       (match prog
         [`(program ,type ,vars ,code)
          `(program ,type
                    ,vars
                    ,(concat-map expand code))]))))
-
-        ;; [`(assign ,var (+ ,(? integer? val1) ,(? integer? val2)))
-        ;;  `((movq (int ,val1) (var ,var))
-        ;;    (addq (int ,val2) (var ,var)))]
 
 (define get-offset
   (lambda (var vars)
@@ -680,9 +694,6 @@
       [`(,inst (deref ,var1 ,off1) (deref ,var2 ,off2))
        `((movq (deref ,var1 ,off1) (reg rax))
          (,inst (reg rax) (deref ,var2 ,off2)))]
-      ;; [`(addq (deref ,var1 ,off1) (deref ,var2 ,off2))
-      ;;  `((movq (deref ,var1 ,off1) (reg rax))
-      ;;    (addq (reg rax) (deref ,var2 ,off2)))]
       [`(neg (deref ,var ,off))
        `((movq (deref ,var ,off) (reg rax))
          (neg (reg rax))
@@ -766,8 +777,6 @@
              `(cmpq ,_ ,_)
              `(movzbq ,_ ,_))
          (std-two-arg-reads instr)]
-        ;; [`(addq ,_ ,_) ]
-        ;; [`(xorq ,_ ,_) (std-two-arg-reads instr)]
         [`(neg ,_) (std-one-arg-reads instr)]
         [`(not ,_) (std-one-arg-reads instr)]
         [(or `(sete ,_)
@@ -787,6 +796,8 @@
       (match instr
         [`(movq ,_ (var ,var))
          `(,var)]
+        [`(movq ,_ ,_)
+         `()]
         [(or `(addq ,_ ,_)
              `(eq? ,_ ,_)
              `(cmpq ,_ ,_)
@@ -832,15 +843,9 @@
                    (set-union live-before-true
                               live-before-false
                               live-before-test))]
-                 ;; (let ((test-live (live-after-sets (list test)))
-                 ;;       (true-live (live-after-sets true))
-                 ;;       (false-live (live-after-sets false)))
-                 ;;   (error 'live-before "This is incorrect"))]
-                   ;; (set-union test-live true-live false-live))]
                 [_
                  (--> reads  <- (get-read-vars curr-instr)
                       writes <- (get-written-vars curr-instr)
-                      ;; `(instr ,(set-calculation reads writes live-after)))])))
                       (set-calculation reads writes live-after))])))
            (live-after-prime
             (lambda (instrs)
@@ -876,10 +881,6 @@
                        (values (live-before curr live-after)
                                (cons `(,curr ,live-after)
                                      processed-instrs)))])])))))
-                    ;; (--> rest <- (live-after-prime (cdr instrs))
-                    ;;    next <- (car rest)
-                    ;;    (cons `(,curr (live-before curr next))
-                    ;;          rest))])))))
     (lambda (instrs)
       ;; L_before is only used for the previous instruction's L_after, making
       ;; the first set useless for our analysis
@@ -891,7 +892,6 @@
   (lambda (prog)
     (match prog
       [`(program ,type ,x ,instrs)
-       ;; `(program ,(live-after-sets instrs) ,x ,instrs)])))
        `(program ,type ,x ,(live-after-sets instrs))])))
 
 (define add-interference-edges
@@ -918,14 +918,6 @@
                           live-vars)
                   d
                   (add-nodes `(,d) graph))]
-       ;; (match live-vars
-       ;;   [`(if-exp ,all-live-vars
-       ;;             ,test-exp ,test-live-vars
-       ;;             ,true-exp ,true-live-vars
-       ;;             ,false-exp ,false-live-vars)
-       ;;    (error 'not-yet-implemented "if stuff is tricky")]
-       ;;   [`(instr ,live-vars)
-       ;;    (error 'not-yet-implemented "not yet sure what to do here")])]
       [(or `(callq ,_)
            `(movq ,_ ,_)
            `(cmpq ,_ ,_)
@@ -947,18 +939,6 @@
                     (live-vars (cadr p)))
                 (match instr
                   [`(if ,test ,true ,false)
-                   ;; this is wrong. the live vars are already in pairs, and i
-                   ;; think that they are wrong in the context of this if
-                   ;; (--> test-graph <- (handle-instrs (cons test
-                   ;;                                         live-vars)
-                   ;;                                   graph)
-                   ;;      true-graph <- (handle-instrs (cons true
-                   ;;                                         live-vars)
-                   ;;                                   test-graph)
-                   ;;      false-graph <- (handle-instrs (cons false
-                   ;;                                          live-vars)
-                   ;;                                    true-graph)
-                   ;;      false-graph)]
                    (--> test-graph <- (handle-instrs test
                                                      graph)
                         true-graph <- (handle-instrs true
@@ -977,27 +957,9 @@
       (handle-instrs instrs
                      (make-graph)))))
 
-;; (debug-define construct-graph
-;;   (lambda (instrs)
-;;     (foldl (lambda (p graph)
-;;              (let ((instr (car p))
-;;                    (live-vars (cadr p)))
-;;                (match instr
-;;                  [`(if ,test ,true ,false)
-;;                   (error 'construct-graph "nyi")]
-;;                  [_
-;;                   (add-interference-edges instr live-vars graph)])))
-;;            (make-graph)
-;;            instrs)))
-
 (debug-define build-interference
   (lambda (prog)
     (match prog
-      ;; [`(program ,live-after-list ,vars ,instrs)
-      ;;  `(program ,(construct-graph instrs
-      ;;                              live-after-list)
-      ;;            ,live-after-list
-      ;;            ,instrs)])))
       [`(program ,type ,vars ,instrs)
        `(program ,type
                  ,(construct-graph instrs)
@@ -1024,14 +986,16 @@
     r8
     r9
     r10
-    r11))
+    ;; r11
+    ))
 
 (define callee-save-regs
   '(rbx
     r12
     r13
     r14
-    r15))
+    ;; r15
+    ))
 
 (define word-size 8)
 
@@ -1190,6 +1154,8 @@
            `(has-type ,exp ,(lookup-variable exp env))]
           [`(read)
            `(has-type ((has-type read built-in)) Integer)]
+          [`(void)
+           `(has-type ((has-type void built-in)) Void)]
           [`(vector ,xs ...)
            (let ((xs-typed (map recur xs)))
              `(has-type ((has-type vector built-in)

@@ -1,4 +1,3 @@
 tests/*.s
-tests/*.in
 *.o
 a.out

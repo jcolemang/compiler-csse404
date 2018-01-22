@@ -223,6 +223,7 @@
                            (uncover-live        ,uncover-live        nothing)
                            (select-instructions ,select-instructions nothing)
                            (flatten             ,flatten             nothing)
+                           (expose-allocation   ,expose-allocation   nothing)
                            (uniquify            ,uniquify            nothing))))
       (type-checker typecheck-R3))
   (compiler-tests "r1-compiler"

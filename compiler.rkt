@@ -23,7 +23,7 @@
 
 ;; My helpers
 
-(define-for-syntax DEBUGGING #f)
+(define-for-syntax DEBUGGING #t)
 
 (define-syntax debug-define
   (lambda (exp)
@@ -850,15 +850,15 @@
                          (set-difference live-vars
                                          writes))))
            (live-before
-            (lambda (curr-instr live-after)
+            (trace-lambda (curr-instr live-after)
               (match curr-instr
                 [`(if ,test ,true ,false)
                  (let-values ([(live-before-test test-instrs)
-                               (live-after-prime (list test))]
+                               (live-after-prime (list test) live-after)]
                               [(live-before-true true-instrs)
-                               (live-after-prime true)]
+                               (live-after-prime true live-after)]
                               [(live-before-false false-instrs)
-                               (live-after-prime false)])
+                               (live-after-prime false live-after)])
                    (set-union live-before-true
                               live-before-false
                               live-before-test))]
@@ -867,18 +867,18 @@
                       writes <- (get-written-vars curr-instr)
                       (set-calculation reads writes live-after))])))
            (live-after-prime
-            (lambda (instrs)
+            (lambda (instrs live-after)
               (let ((curr (car instrs)))
                 (match curr
                   [`(if ,test ,true ,false)
                    (let-values ([(live-before-test test-instrs)
-                                 (live-after-prime (list test))]
+                                 (live-after-prime (list test) live-after)]
                                 [(live-before-true true-instrs)
-                                 (live-after-prime true)]
+                                 (live-after-prime true live-after)]
                                 [(live-before-false false-instrs)
-                                 (live-after-prime false)]
+                                 (live-after-prime false live-after)]
                                 [(live-before-rest rest-instrs)
-                                 (live-after-prime (cdr instrs))])
+                                 (live-after-prime (cdr instrs) live-after)])
                      (let ((live-before-if (set-union live-before-true
                                                       live-before-false
                                                       live-before-test)))
@@ -892,19 +892,21 @@
                    (cond
                     ;; nothing is live after the last instruction
                     [(null? (cdr instrs))
-                     (values (get-read-vars curr)
-                             `((,curr ())))]
+                     (values (set-calculation (get-read-vars curr)
+                                              (get-written-vars curr)
+                                              live-after)
+                             `((,curr ,live-after)))]
                     [else
-                     (let-values ([(live-after processed-instrs)
-                                   (live-after-prime (cdr instrs))])
-                       (values (live-before curr live-after)
-                               (cons `(,curr ,live-after)
+                     (let-values ([(live-after-instrs processed-instrs)
+                                   (live-after-prime (cdr instrs) live-after)])
+                       (values (live-before curr live-after-instrs)
+                               (cons `(,curr ,live-after-instrs)
                                      processed-instrs)))])])))))
     (lambda (instrs)
       ;; L_before is only used for the previous instruction's L_after, making
       ;; the first set useless for our analysis
       (let-values ([(_ new-instrs)
-                    (live-after-prime instrs)])
+                    (live-after-prime instrs '())])
         new-instrs))))
 
 (debug-define uncover-live
@@ -999,7 +1001,8 @@
 
 ;; I don't actually know what r11 is for, but see 5.3.3 for info
 (define caller-save-regs
-  '(rdx
+  '(
+    rdx
     rcx
     rsi
     rdi
@@ -1011,7 +1014,8 @@
 
 ;; r15 is the top of the root stack
 (define callee-save-regs
-  '(rbx
+  '(
+    rbx
     r12
     r13
     r14
@@ -1323,19 +1327,21 @@
        '(+ - read < > <= >= eq? and not void vector-set! vector vector-ref)))
 
 (define run-all
-  (compose print-instructions
-           patch-instructions
-           add-bookkeeping
-           lower-conditionals
-           add-register-saves
-           allocate-registers
-           build-interference
-           uncover-live
-           select-instructions
-           flatten
-           expose-allocation
-           uniquify
-           typecheck-R3))
+  (compose
+   ;; print-instructions
+   ;; patch-instructions
+   ;; add-bookkeeping
+   ;; lower-conditionals
+   ;; add-register-saves
+   allocate-registers
+   build-interference
+   uncover-live
+   select-instructions
+   flatten
+   expose-allocation
+   uniquify
+   typecheck-R3
+   ))
 
 (define run-some
   (compose
@@ -1377,6 +1383,7 @@
          uncover-live
          select-instructions
          flatten
+         expose-allocation
          uniquify
          typecheck-R3
          u-state

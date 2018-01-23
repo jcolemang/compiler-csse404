@@ -23,7 +23,7 @@
 
 ;; My helpers
 
-(define-for-syntax DEBUGGING #t)
+(define-for-syntax DEBUGGING #f)
 
 (define-syntax debug-define
   (lambda (exp)
@@ -695,9 +695,12 @@
                   ,@instrs
                   (label-pos conclusion)
                   (movq (reg rax) (reg rdi))
-                  ,(if (eqv? type 'Integer)
-                       `(callq print_int)
-                       `(callq print_bool))
+                  (literal ,(print-by-type type))
+                  ;; ,(match type
+                  ;;    ['Integer `(callq print_int)]
+                  ;;    ['Boolean `(callq print_bool)]
+                  ;;    [`(Vector ,types ...) `(callq print_vector)]
+                  ;;    [`Void `(callq print_int)])
                   (addq (int ,stack-num) (reg rsp))
                   (popq (reg rax))
                   (and (int 0) (reg rax))
@@ -711,6 +714,18 @@
       [`(,inst (deref ,var1 ,off1) (deref ,var2 ,off2))
        `((movq (deref ,var1 ,off1) (reg rax))
          (,inst (reg rax) (deref ,var2 ,off2)))]
+      [`(,inst (deref ,var1 ,off1) (global-value ,var2))
+       `((movq (deref ,var1 ,off1) (reg rax))
+         (,inst (reg rax) (global-value ,var2)))]
+      [`(,inst (global-value ,var1) (deref ,var2 ,off2))
+       `((movq (global-value ,var1) (reg rax))
+         (,inst (reg rax) (deref ,var2 ,off2)))]
+      [`(,inst (global-value ,var1) (global-value ,var2))
+       `((movq (global-value ,var1) (reg rax))
+         (,inst (reg rax) (global-value ,var2)))]
+      [`(movzbq ,reg (deref ,var ,off))
+       `((movzbq ,reg (reg rax))
+         (movq (reg rax) (deref ,var ,off)))]
       [`(neg (deref ,var ,off))
        `((movq (deref ,var ,off) (reg rax))
          (neg (reg rax))
@@ -742,6 +757,7 @@
                              "main:"
                              ,@(map print-instructions insts)
                              "\n")))]
+      [`(literal ,str) str]
       [`(reg ,reg) (format "%~a" reg)]
       [`(byte-reg ,reg) (format "%~a" reg)]
       [`(label ,label) (format "~a" label)]
@@ -850,35 +866,24 @@
                          (set-difference live-vars
                                          writes))))
            (live-before
-            (trace-lambda (curr-instr live-after)
-              (match curr-instr
-                [`(if ,test ,true ,false)
-                 (let-values ([(live-before-test test-instrs)
-                               (live-after-prime (list test) live-after)]
-                              [(live-before-true true-instrs)
-                               (live-after-prime true live-after)]
-                              [(live-before-false false-instrs)
-                               (live-after-prime false live-after)])
-                   (set-union live-before-true
-                              live-before-false
-                              live-before-test))]
-                [_
-                 (--> reads  <- (get-read-vars curr-instr)
-                      writes <- (get-written-vars curr-instr)
-                      (set-calculation reads writes live-after))])))
+            (lambda (curr-instr live-after)
+              (--> reads  <- (get-read-vars curr-instr)
+                 writes <- (get-written-vars curr-instr)
+                 (set-calculation reads writes live-after))))
            (live-after-prime
             (lambda (instrs live-after)
               (let ((curr (car instrs)))
                 (match curr
                   [`(if ,test ,true ,false)
-                   (let-values ([(live-before-test test-instrs)
-                                 (live-after-prime (list test) live-after)]
-                                [(live-before-true true-instrs)
-                                 (live-after-prime true live-after)]
-                                [(live-before-false false-instrs)
-                                 (live-after-prime false live-after)]
-                                [(live-before-rest rest-instrs)
-                                 (live-after-prime (cdr instrs) live-after)])
+                   (let*-values ([(live-after-instrs processed-instrs)
+                                  (live-after-prime (cdr instrs) live-after)]
+                                 [(live-before-test test-instrs)
+                                  (live-after-prime (list test) live-after-instrs)]
+                                 [(live-before-true true-instrs)
+                                  (live-after-prime true live-after-instrs)]
+                                 [(live-before-false false-instrs)
+                                  (live-after-prime false live-after-instrs)]
+                                 )
                      (let ((live-before-if (set-union live-before-true
                                                       live-before-false
                                                       live-before-test)))
@@ -887,7 +892,7 @@
                                            ,true-instrs
                                            ,false-instrs)
                                        ,live-before-if)
-                                     rest-instrs))))]
+                                     processed-instrs))))]
                   [else
                    (cond
                     ;; nothing is live after the last instruction
@@ -1207,12 +1212,13 @@
                [`((has-type ,_ (Vector ,vec-types ...))
                   (has-type ,_ ,exp-type))
                 (if (and (< idx (length vec-types))
-                         (eqv? exp-type (list-ref vec-types idx)))
-                    `(has-type (vector-set! ,typed-vec-exp
-                                            (has-type ,idx Integer)
-                                            ,typed-val-exp)
+                         (equal? exp-type (list-ref vec-types idx)))
+                    `(has-type ((has-type vector-set! built-in)
+                                ,typed-vec-exp
+                                (has-type ,idx Integer)
+                                ,typed-val-exp)
                                Void)
-                    (type-error 'vector-set! 'some-issue 'no-issue))]
+                    (type-error 'vector-set! exp-type (list-ref vec-types idx)))]
                [_ (type-error 'vector-set! 'idk-man 'something-good)]))]
 
           [`(- ,arg)
@@ -1328,11 +1334,11 @@
 
 (define run-all
   (compose
-   ;; print-instructions
-   ;; patch-instructions
-   ;; add-bookkeeping
-   ;; lower-conditionals
-   ;; add-register-saves
+   print-instructions
+   patch-instructions
+   add-bookkeeping
+   lower-conditionals
+   add-register-saves
    allocate-registers
    build-interference
    uncover-live

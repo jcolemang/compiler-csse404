@@ -480,4 +480,3 @@ void print_vector(int64_t* vector_ptr)
   }
   printf(")");
 }
-

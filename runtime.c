@@ -300,9 +300,26 @@ static void copy_vector(int64_t** vector_ptr_loc);
   versa.
 */
 
-void cheney(int64_t** rootstack_ptr)
-{
+void cheney(int64_t** rootstack_ptr) {
+  int64_t* orig_free_ptr = free_ptr;
+  free_ptr = tospace_begin;
 
+  while (rootstack_ptr != rootstack_begin) {
+    int64_t* curr_vector = free_ptr;
+    int64_t curr_vector_tag = curr_vector[0];
+    int curr_vector_length = get_length(curr_vector_tag);
+    if (is_forwarding(curr_vector_tag)) {
+      copy_vector(&curr_vector);
+    }
+    rootstack_ptr--;
+  }
+
+  int64_t* tospace_begin_temp;
+  int64_t* tospace_end_temp;
+  fromspace_begin = tospace_begin;
+  fromspace_end = tospace_end;
+  fromspace_begin = tospace_begin_temp;
+  fromspace_end = tospace_end_temp;
 }
 
 
@@ -356,9 +373,22 @@ void cheney(int64_t** rootstack_ptr)
  the invariant that the free_ptr points to the next free memory address.
 
 */
-void copy_vector(int64_t** vector_ptr_loc)
-{
+void copy_vector(int64_t** vector_ptr_loc) {
+  int64_t* curr_vector = *vector_ptr_loc;
+  int64_t curr_vector_tag = curr_vector[0];
+  curr_vector[0] = curr_vector_tag ^ 1;
+  int curr_vector_length = get_length(curr_vector_tag);
+  int64_t is_ptr_mask = get_ptr_bitfield(curr_vector_tag);
 
+  free_ptr[0] = curr_vector_tag;
+  for (int i = 0; i < curr_vector_length; i++) {
+    free_ptr[i] = curr_vector[i];
+    if ((1 << i) & is_ptr_mask) {
+      copy_vector((int64_t**)&curr_vector[i]);
+    }
+  }
+
+  free_ptr += curr_vector_length;
 }
 
 

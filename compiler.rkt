@@ -23,7 +23,7 @@
 
 ;; My helpers
 
-(define-for-syntax DEBUGGING #f)
+(define-for-syntax DEBUGGING #t)
 
 (define-syntax debug-define
   (lambda (exp)
@@ -572,9 +572,12 @@
                   [`(eq? ,exp1 ,exp2)
                    `(eq? ,(expand exp1) ,(expand exp2))]
                   [`(collect ,num-bytes)
-                   `((movq (reg r15) (reg rdi))
+                   `(;; (spill-vectors-to-root-stack)
+                     (movq (reg r15) (reg rdi))
                      (movq ,num-bytes (reg rsi))
-                     (callq collect))]
+                     (callq collect)
+                     ;; (restore-vectors-from-root-stack)
+                     )]
                   [`(if ,test ,true ,false)
                    `((if ,(expand test)
                          ,(concat-map expand true)
@@ -668,7 +671,7 @@
                          instrs)))))
     (lambda (prog)
       (match prog
-        [`(program ,type ,num ,live-varss ,instrs)
+        [`(program ,type ,typed-vars ,num ,live-varss ,instrs)
          `(program ,type
                    ,num
                    ,(helper live-varss instrs))]))))
@@ -686,8 +689,8 @@
                   (pushq (reg rax))
                   (movq (reg rsp) (reg rbp))
                   (subq (int ,stack-num) (reg rsp))
-                  (movq (int 16384) (reg rdi))
-                  (movq (int 16384) (reg rsi))
+                  (movq (int 16) (reg rdi))
+                  (movq (int 64) (reg rsi))
                   (callq initialize)
                   (movq (global-value rootstack_begin) (reg r15))
                   (movq (int 0) (deref r15 0))
@@ -696,11 +699,6 @@
                   (label-pos conclusion)
                   (movq (reg rax) (reg rdi))
                   (literal ,(print-by-type type))
-                  ;; ,(match type
-                  ;;    ['Integer `(callq print_int)]
-                  ;;    ['Boolean `(callq print_bool)]
-                  ;;    [`(Vector ,types ...) `(callq print_vector)]
-                  ;;    [`Void `(callq print_int)])
                   (addq (int ,stack-num) (reg rsp))
                   (popq (reg rax))
                   (and (int 0) (reg rax))
@@ -986,8 +984,9 @@
 (debug-define build-interference
   (lambda (prog)
     (match prog
-      [`(program ,type ,vars ,instrs)
+      [`(program ,type ,typed-vars ,instrs)
        `(program ,type
+                 ,typed-vars
                  ,(construct-graph instrs)
                  ,instrs)])))
 
@@ -1064,7 +1063,7 @@
                                   rest)]))))))
       (lambda (prog)
         (match prog
-          [`(program ,type ,graph ,instrs)
+          [`(program ,type ,typed-vars ,graph ,instrs)
            (--> get-color-var <- car
                 get-color-num <- cdr
                 colors <- (color-graph graph)
@@ -1088,6 +1087,7 @@
                                 colors)
                 reg-map <- (make-immutable-hasheqv reg-mapping)
                 `(program ,type
+                          ,typed-vars
                           ,(let ((stack-num (- (add1 num-colors)
                                                (length caller-save-regs))))
                              (max (* stack-num word-size) 0))

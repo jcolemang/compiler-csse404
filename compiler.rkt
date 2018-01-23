@@ -23,7 +23,7 @@
 
 ;; My helpers
 
-(define-for-syntax DEBUGGING #t)
+(define-for-syntax DEBUGGING #f)
 
 (define-syntax debug-define
   (lambda (exp)
@@ -572,12 +572,11 @@
                   [`(eq? ,exp1 ,exp2)
                    `(eq? ,(expand exp1) ,(expand exp2))]
                   [`(collect ,num-bytes)
-                   `(;; (spill-vectors-to-root-stack)
+                   `((spill-vectors-to-root-stack)
                      (movq (reg r15) (reg rdi))
                      (movq ,num-bytes (reg rsi))
                      (callq collect)
-                     ;; (restore-vectors-from-root-stack)
-                     )]
+                     (restore-vectors-from-root-stack))]
                   [`(if ,test ,true ,false)
                    `((if ,(expand test)
                          ,(concat-map expand true)
@@ -689,7 +688,7 @@
                   (pushq (reg rax))
                   (movq (reg rsp) (reg rbp))
                   (subq (int ,stack-num) (reg rsp))
-                  (movq (int 16) (reg rdi))
+                  (movq (int 8) (reg rdi))
                   (movq (int 64) (reg rsi))
                   (callq initialize)
                   (movq (global-value rootstack_begin) (reg r15))
@@ -812,7 +811,9 @@
          (std-two-arg-reads instr)]
         [`(neg ,_) (std-one-arg-reads instr)]
         [`(not ,_) (std-one-arg-reads instr)]
-        [(or `(sete ,_)
+        [(or `(restore-vectors-from-root-stack)
+             `(spill-vectors-to-root-stack)
+             `(sete ,_)
              `(setle ,_)
              `(setge ,_)
              `(setg ,_)
@@ -842,7 +843,9 @@
          `(,var)]
         [`(not (var ,var))
          `(,var)]
-        [(or `(sete ,_)
+        [(or `(restore-vectors-from-root-stack)
+             `(spill-vectors-to-root-stack)
+             `(sete ,_)
              `(setl ,_)
              `(setg ,_)
              `(setge ,_)
@@ -942,7 +945,9 @@
                           live-vars)
                   d
                   (add-nodes `(,d) graph))]
-      [(or `(callq ,_)
+      [(or `(spill-vectors-to-root-stack)
+           `(restore-vectors-from-root-stack)
+           `(callq ,_)
            `(movq ,_ ,_)
            `(cmpq ,_ ,_)
            `(xorq ,_ ,_)
@@ -989,6 +994,39 @@
                  ,typed-vars
                  ,(construct-graph instrs)
                  ,instrs)])))
+
+(debug-define manage-root-stack
+  (lambda (prog)
+    (match prog
+      [`(program ,type ,typed-vars ,graph ,instrs)
+       (letrec ((helper
+                 (lambda (instr)
+                   (match instr
+                     [`((spill-vectors-to-root-stack) ,live-vars)
+                      (concat-map (lambda (live-var)
+                                    (let ((var-type (cdr (assv live-var typed-vars))))
+                                      (match var-type
+                                        [`(Vector ,vec-types ...)
+                                         `(((movq (var ,live-var) (deref r15 0)) ,live-vars)
+                                           ((addq (int 8) (reg r15)) ,live-vars))]
+                                        [x (list)])))
+                                    (sort live-vars symbol<?))]
+                     [`((restore-vectors-from-root-stack) ,live-vars)
+                      (concat-map (lambda (live-var)
+                                    (let ((var-type (cdr (assv live-var typed-vars))))
+                                      (match var-type
+                                        [`(Vector ,vec-types ...)
+                                         `(((addq (int -8) (reg r15)) ,live-vars)
+                                           ((movq (deref r15 0) (var ,live-var)) ,live-vars))]
+                                         [_ (list)])))
+                                  (sort live-vars symbol<?))]
+                     [`((if ,test ,true ,false) ,live-vars)
+                      `(((if ,test
+                             ,(concat-map helper true)
+                             ,(concat-map helper false))
+                         ,live-vars))]
+                     [x (list x)]))))
+         `(program ,type ,typed-vars ,graph ,(concat-map helper instrs)))])))
 
 (define caller-save?
   (lambda (reg)
@@ -1340,6 +1378,7 @@
    lower-conditionals
    add-register-saves
    allocate-registers
+   manage-root-stack
    build-interference
    uncover-live
    select-instructions
@@ -1384,6 +1423,7 @@
          patch-instructions
          add-bookkeeping
          add-register-saves
+         manage-root-stack
          allocate-registers
          build-interference
          uncover-live

@@ -219,6 +219,7 @@
                            (lower-conditionals  ,lower-conditionals  nothing)
                            (add-register-saves  ,add-register-saves  nothing)
                            (allocate-registers  ,allocate-registers  nothing)
+                           (manage-root-stack   ,manage-root-stack   nothing)
                            (build-interference  ,build-interference  nothing)
                            (uncover-live        ,uncover-live        nothing)
                            (select-instructions ,select-instructions nothing)

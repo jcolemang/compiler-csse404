@@ -44,7 +44,7 @@
 ;;   (display (run-all test-prog)))
 ;; (let ((test-prog '(program (vector-ref (vector-ref (vector (vector 42 32)) 0) 1))))
 ;;   (display (run-all test-prog)))
-(let ((test-prog '(program (vector #t))))
+(let ((test-prog '(program (vector (vector #t)))))
   (display (run-all test-prog)))
 
 ;; (let ((test-prog '(program (let ([a 1])

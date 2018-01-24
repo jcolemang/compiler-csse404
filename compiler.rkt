@@ -572,11 +572,13 @@
                   [`(eq? ,exp1 ,exp2)
                    `(eq? ,(expand exp1) ,(expand exp2))]
                   [`(collect ,num-bytes)
-                   `((spill-vectors-to-root-stack)
+                   `(
+                     (spill-vectors-to-root-stack)
                      (movq (reg r15) (reg rdi))
                      (movq ,num-bytes (reg rsi))
                      (callq collect)
-                     (restore-vectors-from-root-stack))]
+                     (restore-vectors-from-root-stack)
+                     )]
                   [`(if ,test ,true ,false)
                    `((if ,(expand test)
                          ,(concat-map expand true)
@@ -688,8 +690,8 @@
                   (pushq (reg rax))
                   (movq (reg rsp) (reg rbp))
                   (subq (int ,stack-num) (reg rsp))
-                  (movq (int 8) (reg rdi))
-                  (movq (int 64) (reg rsi))
+                  (movq (int 2048) (reg rdi))
+                  (movq (int 1024) (reg rsi))
                   (callq initialize)
                   (movq (global-value rootstack_begin) (reg r15))
                   (movq (int 0) (deref r15 0))
@@ -1019,7 +1021,7 @@
                                          `(((addq (int -8) (reg r15)) ,live-vars)
                                            ((movq (deref r15 0) (var ,live-var)) ,live-vars))]
                                          [_ (list)])))
-                                  (sort live-vars symbol<?))]
+                                  (reverse (sort live-vars symbol<?)))]
                      [`((if ,test ,true ,false) ,live-vars)
                       `(((if ,test
                              ,(concat-map helper true)
@@ -1046,8 +1048,8 @@
   '(
     rdx
     rcx
-    rsi
-    rdi
+    ;; rsi
+    ;; rdi
     r8
     r9
     r10

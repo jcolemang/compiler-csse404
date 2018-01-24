@@ -4,6 +4,7 @@
 #include <assert.h>
 #include "runtime.h"
 
+#define NDEBUG 1
 // To do: we need to account for the "any" type. -Jeremy
 
 // Often misunderstood: static global variables in C are not
@@ -150,7 +151,7 @@ void collect(int64_t** rootstack_ptr, uint64_t bytes_requested)
 
   // 3. Check if collection freed enough space in order to allocate
   if (sizeof(int64_t) * (fromspace_end - free_ptr) < bytes_requested){
-    //printf("resizing the heap\n");
+    /* printf("resizing the heap\n"); */
     /*
        If there is not enough room left for the bytes_requested,
        allocate larger tospace and fromspace.
@@ -314,10 +315,10 @@ void cheney(int64_t** rootstack_ptr) {
     rootstack_ptr--;
   }
 
-  int64_t* tospace_begin_temp;
-  int64_t* tospace_end_temp;
-  fromspace_begin = tospace_begin;
-  fromspace_end = tospace_end;
+  int64_t* tospace_begin_temp = tospace_begin;
+  int64_t* tospace_end_temp = tospace_end;
+  tospace_begin = fromspace_begin;
+  tospace_end = fromspace_end;
   fromspace_begin = tospace_begin_temp;
   fromspace_end = tospace_end_temp;
 }

@@ -23,7 +23,7 @@
 
 ;; My helpers
 
-(define-for-syntax DEBUGGING #t)
+(define-for-syntax DEBUGGING #f)
 
 (define-syntax debug-define
   (lambda (exp)
@@ -282,7 +282,7 @@
 ;; Actual compiler
 
 (define variable-lookup
-  (trace-lambda (var assoc-list)
+  (lambda (var assoc-list)
     (>>= (not (null? assoc-list))
          assoc-var <- (assq var assoc-list)
          (cdr assoc-var))))
@@ -1176,12 +1176,6 @@
                    ,(concat-map lower-condition
                                 instrs))]))))
 
-
-
-;; (define variable-lookup
-;;   (trace-lambda (var env)
-;;     (cdr (assv var env))))
-
 (define extend-env
   (lambda (var val env)
     (cons `(,var . ,val) env)))
@@ -1219,28 +1213,28 @@
            expected
            actual)))
 
-(define typecheck-R3-curry
+(define typecheck-R4-curry
   (let ((get-func-type (lambda (def)
                          (match def
                            [`(define (,name ,params ...) : ,type ,_)
                             `(,name Function ,(map caddr params)
                                     ,type)]))))
     (lambda (env)
-      (trace-lambda (exp)
-        (let ((recur (typecheck-R3-curry env)))
+      (lambda (exp)
+        (let ((recur (typecheck-R4-curry env)))
           (match exp
             [`(program ,defines ... ,body)
              (--> define-infos <- (map get-func-type defines)
                   global-env <- (extend-env-vars define-infos env)
-                  typed-defines <- (map (typecheck-R3-curry global-env) defines)
-                  typed-body <- ((typecheck-R3-curry global-env) body)
+                  typed-defines <- (map (typecheck-R4-curry global-env) defines)
+                  typed-body <- ((typecheck-R4-curry global-env) body)
                   (match typed-body
                     [`(has-type ,typed-body ,type)
                      `(program (type ,type)
                                ,typed-defines
                                ((has-type ,typed-body ,type)))]))]
              [`(define (,name ,vars ...) : ,type ,body)
-              (let ((typed-body ((typecheck-R3-curry
+              (let ((typed-body ((typecheck-R4-curry
                                   (extend-env-vars (map (lambda (wrong-cell)
                                                           (cons (car wrong-cell)
                                                                 (caddr wrong-cell)))
@@ -1381,7 +1375,7 @@
                                          (list var (recur val)))
                                        vars
                                        vals)
-                   typed-body <- ((typecheck-R3-curry (foldl (lambda (pair ext-env)
+                   typed-body <- ((typecheck-R4-curry (foldl (lambda (pair ext-env)
                                                                (extend-env (car pair)
                                                                            (match (cadr pair)
                                                                              [`(has-type ,_
@@ -1408,8 +1402,8 @@
                          `(has-type (,func-typed ,@params-typed) ,return-type))])))]
              ))))))
 
-(debug-define typecheck-R3
-  (typecheck-R3-curry '()))
+(debug-define typecheck-R4
+  (typecheck-R4-curry '()))
 
 (define built-ins
   (map (lambda (x)
@@ -1431,7 +1425,7 @@
    flatten
    expose-allocation
    uniquify
-   typecheck-R3
+   typecheck-R4
    ))
 
 (define run-some
@@ -1477,7 +1471,7 @@
          flatten
          expose-allocation
          uniquify
-         typecheck-R3
+         typecheck-R4
          u-state
          built-ins
          run-all

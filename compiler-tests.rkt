@@ -226,7 +226,7 @@
                            (flatten             ,flatten             nothing)
                            (expose-allocation   ,expose-allocation   nothing)
                            (uniquify            ,uniquify            nothing))))
-      (type-checker typecheck-R3))
+      (type-checker typecheck-R4))
   (compiler-tests "r1-compiler"
                   type-checker
                   compiler

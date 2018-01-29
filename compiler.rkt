@@ -23,7 +23,7 @@
 
 ;; My helpers
 
-(define-for-syntax DEBUGGING #f)
+(define-for-syntax DEBUGGING #t)
 
 (define-syntax debug-define
   (lambda (exp)
@@ -294,8 +294,15 @@
   (lambda (prog)
     (match prog
       [`(program ,type ,defines ,instrs)
-       `(program ,type
-                 ,(map (uniquify-exp (u-state built-ins 0)) instrs))])))
+       (--> init-env <- (u-state (extend-env-vars
+                               (map (lambda (x) (cons (caadr x) (caadr x))) defines)
+                               built-ins)
+                              0)
+          uniq-defs <- (map (uniquify-def init-env) defines)
+          uniq-bodies <- (map (uniquify-exp init-env) instrs)
+          `(program ,type
+                    ,uniq-defs
+                    ,uniq-bodies))])))
 
 (define type-and-exp
   (lambda (exp)
@@ -308,6 +315,26 @@
     (match exp
       [`(has-type ,exp ,type)
        type])))
+
+(define uniquify-def
+  (lambda (state)
+    (lambda (def)
+      (let ((assoc-list (u-state-assoc-list state))
+            (same-state-uniquify (uniquify-exp state)))
+        (match def
+          [`(define (,name ,vars ...) : ,type ,body)
+           (--> renamed-vars <- (map (lambda (formal) (cons formal (gensym))) (map car vars))
+              new-env <- (extend-env-vars renamed-vars assoc-list)
+              new-vars <- (map (lambda (var)
+                                (match var [`(,var-name : ,type)
+                                            `(,(variable-lookup var-name new-env) : ,type)]))
+                              vars)
+              `(define (,name ,@new-vars) : ,type
+                 ,((uniquify-exp
+                   (struct-copy u-state
+                                state
+                                (assoc-list new-env)))
+                   body)))])))))
 
 (define uniquify-exp
   (lambda (state)
@@ -344,6 +371,46 @@
                            `(,(f operator)
                              ,@(map f operands)))])
                      ,type))))))
+
+(debug-define reveal-functions
+  (lambda (prog)
+    (match prog
+      [`(program ,type ,defs ,bodies)
+       (--> func-names <- (map caadr defs)
+          revealed-defs <- (map (reveal-def func-names) defs)
+          revealed-bodies <- (map (reveal-exp func-names) bodies)
+          `(program ,type ,revealed-defs ,revealed-bodies))])))
+
+(define reveal-def
+  (lambda (func-names)
+    (lambda (def)
+      (match def
+        [`(define (,name ,vars ...) : ,type ,body)
+         `(define (,name ,@vars) : ,type ,((reveal-exp func-names) body))]))))
+
+(define reveal-exp
+  (lambda (func-names)
+    (lambda (typed-exp)
+      (let-values ([(exp type)
+                    (type-and-exp typed-exp)])
+        (let ([recur (reveal-exp func-names)])
+          `(has-type ,(match exp
+                        [(? symbol?)
+                         (if (member exp func-names)
+                             `(function-ref ,exp)
+                             exp)]
+                        [`(if ,test ,true ,false)
+                         `(if ,(recur test)
+                              ,(recur true)
+                              ,(recur false))]
+                        [`(let ([,var ,val]) ,body)
+                         `(let ([,var ,(recur val)]) ,(recur body))]
+                        [`(,operator ,operands ...)
+                         (match (get-type operator)
+                           [`(Function ,arg-types ,ret-type)
+                            `(app ,(recur operator) ,@(map recur operands))]
+                           [_ exp])]
+                        [x x]) ,type))))))
 
 (debug-define expose-allocation
   (letrec ((let-nester
@@ -1213,194 +1280,196 @@
            expected
            actual)))
 
-(define typecheck-R4-curry
-  (let ((get-func-type (lambda (def)
-                         (match def
-                           [`(define (,name ,params ...) : ,type ,_)
-                            `(,name Function ,(map caddr params)
-                                    ,type)]))))
-    (lambda (env)
-      (lambda (exp)
-        (let ((recur (typecheck-R4-curry env)))
-          (match exp
-            [`(program ,defines ... ,body)
-             (--> define-infos <- (map get-func-type defines)
-                  global-env <- (extend-env-vars define-infos env)
-                  typed-defines <- (map (typecheck-R4-curry global-env) defines)
-                  typed-body <- ((typecheck-R4-curry global-env) body)
-                  (match typed-body
-                    [`(has-type ,typed-body ,type)
-                     `(program (type ,type)
-                               ,typed-defines
-                               ((has-type ,typed-body ,type)))]))]
-             [`(define (,name ,vars ...) : ,type ,body)
-              (let ((typed-body ((typecheck-R4-curry
-                                  (extend-env-vars (map (lambda (wrong-cell)
-                                                          (cons (car wrong-cell)
-                                                                (caddr wrong-cell)))
-                                                        vars)
-                                                   env)) body)))
-                (if (not (equal? type (get-type typed-body)))
-                    (type-error name type (get-type typed-body))
-                    `(define (,name ,@vars) : ,type ,typed-body)))]
-             [(? fixnum?)
-              `(has-type ,exp Integer)]
-             [(? boolean?)
-              `(has-type ,exp Boolean)]
-             [(? symbol?)
-              `(has-type ,exp ,(variable-lookup exp env))]
-             [`(read)
-              `(has-type ((has-type read built-in)) Integer)]
-             [`(void)
-              `(has-type ((has-type void built-in)) Void)]
-             [`(vector ,xs ...)
-              (let ((xs-typed (map recur xs)))
-                `(has-type ((has-type vector built-in)
-                            ,@xs-typed)
-                           (Vector ,@(map caddr xs-typed))))]
-             [`(vector-ref ,vec-exp ,(? exact-nonnegative-integer? idx))
-              (let ((typed-vec-exp (recur vec-exp))
-                    (typed-idx-exp `(has-type ,idx Integer)))
-                (match typed-vec-exp
-                  [`(has-type ,_ (Vector ,vec-types ...))
-                   (if (< idx (length vec-types))
-                       `(has-type ((has-type vector-ref built-in)
-                                   ,typed-vec-exp
-                                   ,typed-idx-exp)
-                                  ,(list-ref vec-types idx))
-                       (type-error 'vector-ref vec-types 'too-long))]
-                  [_ (type-error 'vector
-                                 (caddr typed-vec-exp)
-                                 'Vector-something)]))]
-             [`(vector-set! ,vec ,(? exact-nonnegative-integer? idx) ,exp)
-              (let ((typed-vec-exp (recur vec))
-                    (typed-val-exp (recur exp)))
-                (match `(,typed-vec-exp ,typed-val-exp)
-                  [`((has-type ,_ (Vector ,vec-types ...))
-                     (has-type ,_ ,exp-type))
-                   (if (and (< idx (length vec-types))
-                            (equal? exp-type (list-ref vec-types idx)))
-                       `(has-type ((has-type vector-set! built-in)
-                                   ,typed-vec-exp
-                                   (has-type ,idx Integer)
-                                   ,typed-val-exp)
-                                  Void)
-                       (type-error 'vector-set! exp-type (list-ref vec-types idx)))]
-                  [_ (type-error 'vector-set! 'idk-man 'something-good)]))]
+(define get-func-type
+  (lambda (def)
+    (match def
+      [`(define (,name ,params ...) : ,type ,_)
+       `(,name Function ,(map caddr params)
+               ,type)])))
 
-             [`(- ,arg)
-              (match (recur arg)
-                [`(has-type ,typed-arg Integer)
-                 `(has-type ((has-type - built-in)
-                             (has-type ,typed-arg Integer))
-                            Integer)]
-                [`(has-type ,typed-arg ,bad-type)
-                 (type-error '- bad-type 'Integer)])]
-             [`(,(and (or '< '> '<= '>=)
-                      op) ,arg1 ,arg2)
-              (match `(,(recur arg1) ,(recur arg2))
-                [`((has-type ,typed-arg1 Integer)
-                   (has-type ,typed-arg2 Integer))
-                 `(has-type ((has-type ,op built-in)
-                             (has-type ,typed-arg1 Integer)
-                             (has-type ,typed-arg2 Integer))
-                            Boolean)]
-                [`((has-type ,_ ,bad-arg1-type)
-                   (has-type ,_ ,bad-arg2-type))
-                 (type-error op
-                             `(,bad-arg1-type ,bad-arg2-type)
-                             `(Integer Integer))])]
-             [`(,(and (or 'and)
-                      rator)
-                ,arg1
-                ,arg2)
-              (match `(,(recur arg1)
-                       ,(recur arg2))
-                [`((has-type ,typed-arg1 Boolean)
-                   (has-type ,typed-arg2 Boolean))
-                 `(has-type ((has-type ,rator built-in)
-                             (has-type ,typed-arg1 Boolean)
-                             (has-type ,typed-arg2 Boolean))
-                            Boolean)])]
-             [`(,(and (or 'eq?)
-                      rator)
-                ,arg1
-                ,arg2)
-              (match `(,(recur arg1)
-                       ,(recur arg2))
-                [`((has-type ,typed-arg1 ,type)
-                   (has-type ,typed-arg2 ,type))
-                 `(has-type ((has-type ,rator built-in)
-                             (has-type ,typed-arg1 ,type)
-                             (has-type ,typed-arg2 ,type))
-                            Boolean)])]
-             ;; (let ((arg1-type (recur arg1))
-             ;;       (arg2-type (recur arg2)))
-             ;;   (check-types-equal arg1-type arg2-type 'eq?)
-             ;;   'Boolean)]
-             [`(+ ,arg1 ,arg2)
-              (match `(,(recur arg1)
-                       ,(recur arg2))
-                [`((has-type ,typed-arg1 Integer)
-                   (has-type ,typed-arg2 Integer))
-                 `(has-type ((has-type + built-in)
-                             (has-type ,typed-arg1 Integer)
-                             (has-type ,typed-arg2 Integer))
-                            Integer)]
-                [`((has-type ,_ ,bad-arg1-type)
-                   (has-type ,_ ,bad-arg2-type))
-                 (type-error '+
-                             `(,bad-arg1-type ,bad-arg2-type)
-                             `(Integer Integer))])]
-             [`(not ,exp)
-              (match (recur exp)
-                [`(has-type ,typed-exp Boolean)
-                 `(has-type ((has-type not built-in) (has-type ,typed-exp Boolean)) Boolean)])]
-             [`(if ,test ,true ,false)
-              (let ((test-typed (recur test))
-                    (true-typed (recur true))
-                    (false-typed (recur false)))
-                (match `(,test-typed
-                         ,true-typed
-                         ,false-typed)
-                  [`((has-type ,_ Boolean)
-                     (has-type ,_ ,branch-type)
-                     (has-type ,_ ,branch-type))
-                   `(has-type (if ,test-typed
-                                  ,true-typed
-                                  ,false-typed)
-                              ,branch-type)]))]
-             [`(let ((,vars ,vals) ...) ,body)
-              (--> typed-pairs <- (map (lambda (var val)
-                                         (list var (recur val)))
-                                       vars
-                                       vals)
-                   typed-body <- ((typecheck-R4-curry (foldl (lambda (pair ext-env)
-                                                               (extend-env (car pair)
-                                                                           (match (cadr pair)
-                                                                             [`(has-type ,_
-                                                                                         ,type)
-                                                                              type])
-                                                                           ext-env))
-                                                             env
-                                                             typed-pairs))
-                                  body)
-                   (match typed-body
-                     [`(has-type ,_ ,type)
-                      `(has-type (let ,typed-pairs
-                                   ,typed-body)
-                                 ,type)]))]
-             [`(,func ,params ...)
-              (let ((func-typed (recur func))
-                    (params-typed (map recur params)))
-                (let ((func-type (get-type func-typed)))
-                  (match func-type
-                    [`(Function ,param-types ,return-type)
-                     (if (not (equal? (map get-type params-typed)
-                                      param-types))
-                         (type-error 'fuck 'off 'compilers)
-                         `(has-type (,func-typed ,@params-typed) ,return-type))])))]
-             ))))))
+(define typecheck-R4-curry
+  (lambda (env)
+    (lambda (exp)
+      (let ((recur (typecheck-R4-curry env)))
+        (match exp
+          [`(program ,defines ... ,body)
+           (--> define-infos <- (map get-func-type defines)
+              global-env <- (extend-env-vars define-infos env)
+              typed-defines <- (map (typecheck-R4-curry global-env) defines)
+              typed-body <- ((typecheck-R4-curry global-env) body)
+              (match typed-body
+                [`(has-type ,typed-body ,type)
+                 `(program (type ,type)
+                           ,typed-defines
+                           ((has-type ,typed-body ,type)))]))]
+          [`(define (,name ,vars ...) : ,type ,body)
+           (let ((typed-body ((typecheck-R4-curry
+                               (extend-env-vars (map (lambda (wrong-cell)
+                                                       (cons (car wrong-cell)
+                                                             (caddr wrong-cell)))
+                                                     vars)
+                                                env)) body)))
+             (if (not (equal? type (get-type typed-body)))
+                 (type-error name type (get-type typed-body))
+                 `(define (,name ,@vars) : ,type ,typed-body)))]
+          [(? fixnum?)
+           `(has-type ,exp Integer)]
+          [(? boolean?)
+           `(has-type ,exp Boolean)]
+          [(? symbol?)
+           `(has-type ,exp ,(variable-lookup exp env))]
+          [`(read)
+           `(has-type ((has-type read built-in)) Integer)]
+          [`(void)
+           `(has-type ((has-type void built-in)) Void)]
+          [`(vector ,xs ...)
+           (let ((xs-typed (map recur xs)))
+             `(has-type ((has-type vector built-in)
+                         ,@xs-typed)
+                        (Vector ,@(map caddr xs-typed))))]
+          [`(vector-ref ,vec-exp ,(? exact-nonnegative-integer? idx))
+           (let ((typed-vec-exp (recur vec-exp))
+                 (typed-idx-exp `(has-type ,idx Integer)))
+             (match typed-vec-exp
+               [`(has-type ,_ (Vector ,vec-types ...))
+                (if (< idx (length vec-types))
+                    `(has-type ((has-type vector-ref built-in)
+                                ,typed-vec-exp
+                                ,typed-idx-exp)
+                               ,(list-ref vec-types idx))
+                    (type-error 'vector-ref vec-types 'too-long))]
+               [_ (type-error 'vector
+                              (caddr typed-vec-exp)
+                              'Vector-something)]))]
+          [`(vector-set! ,vec ,(? exact-nonnegative-integer? idx) ,exp)
+           (let ((typed-vec-exp (recur vec))
+                 (typed-val-exp (recur exp)))
+             (match `(,typed-vec-exp ,typed-val-exp)
+               [`((has-type ,_ (Vector ,vec-types ...))
+                  (has-type ,_ ,exp-type))
+                (if (and (< idx (length vec-types))
+                         (equal? exp-type (list-ref vec-types idx)))
+                    `(has-type ((has-type vector-set! built-in)
+                                ,typed-vec-exp
+                                (has-type ,idx Integer)
+                                ,typed-val-exp)
+                               Void)
+                    (type-error 'vector-set! exp-type (list-ref vec-types idx)))]
+               [_ (type-error 'vector-set! 'idk-man 'something-good)]))]
+
+          [`(- ,arg)
+           (match (recur arg)
+             [`(has-type ,typed-arg Integer)
+              `(has-type ((has-type - built-in)
+                          (has-type ,typed-arg Integer))
+                         Integer)]
+             [`(has-type ,typed-arg ,bad-type)
+              (type-error '- bad-type 'Integer)])]
+          [`(,(and (or '< '> '<= '>=)
+                   op) ,arg1 ,arg2)
+           (match `(,(recur arg1) ,(recur arg2))
+             [`((has-type ,typed-arg1 Integer)
+                (has-type ,typed-arg2 Integer))
+              `(has-type ((has-type ,op built-in)
+                          (has-type ,typed-arg1 Integer)
+                          (has-type ,typed-arg2 Integer))
+                         Boolean)]
+             [`((has-type ,_ ,bad-arg1-type)
+                (has-type ,_ ,bad-arg2-type))
+              (type-error op
+                          `(,bad-arg1-type ,bad-arg2-type)
+                          `(Integer Integer))])]
+          [`(,(and (or 'and)
+                   rator)
+             ,arg1
+             ,arg2)
+           (match `(,(recur arg1)
+                    ,(recur arg2))
+             [`((has-type ,typed-arg1 Boolean)
+                (has-type ,typed-arg2 Boolean))
+              `(has-type ((has-type ,rator built-in)
+                          (has-type ,typed-arg1 Boolean)
+                          (has-type ,typed-arg2 Boolean))
+                         Boolean)])]
+          [`(,(and (or 'eq?)
+                   rator)
+             ,arg1
+             ,arg2)
+           (match `(,(recur arg1)
+                    ,(recur arg2))
+             [`((has-type ,typed-arg1 ,type)
+                (has-type ,typed-arg2 ,type))
+              `(has-type ((has-type ,rator built-in)
+                          (has-type ,typed-arg1 ,type)
+                          (has-type ,typed-arg2 ,type))
+                         Boolean)])]
+          ;; (let ((arg1-type (recur arg1))
+          ;;       (arg2-type (recur arg2)))
+          ;;   (check-types-equal arg1-type arg2-type 'eq?)
+          ;;   'Boolean)]
+          [`(+ ,arg1 ,arg2)
+           (match `(,(recur arg1)
+                    ,(recur arg2))
+             [`((has-type ,typed-arg1 Integer)
+                (has-type ,typed-arg2 Integer))
+              `(has-type ((has-type + built-in)
+                          (has-type ,typed-arg1 Integer)
+                          (has-type ,typed-arg2 Integer))
+                         Integer)]
+             [`((has-type ,_ ,bad-arg1-type)
+                (has-type ,_ ,bad-arg2-type))
+              (type-error '+
+                          `(,bad-arg1-type ,bad-arg2-type)
+                          `(Integer Integer))])]
+          [`(not ,exp)
+           (match (recur exp)
+             [`(has-type ,typed-exp Boolean)
+              `(has-type ((has-type not built-in) (has-type ,typed-exp Boolean)) Boolean)])]
+          [`(if ,test ,true ,false)
+           (let ((test-typed (recur test))
+                 (true-typed (recur true))
+                 (false-typed (recur false)))
+             (match `(,test-typed
+                      ,true-typed
+                      ,false-typed)
+               [`((has-type ,_ Boolean)
+                  (has-type ,_ ,branch-type)
+                  (has-type ,_ ,branch-type))
+                `(has-type (if ,test-typed
+                               ,true-typed
+                               ,false-typed)
+                           ,branch-type)]))]
+          [`(let ((,vars ,vals) ...) ,body)
+           (--> typed-pairs <- (map (lambda (var val)
+                                   (list var (recur val)))
+                                 vars
+                                 vals)
+              typed-body <- ((typecheck-R4-curry (foldl (lambda (pair ext-env)
+                                                         (extend-env (car pair)
+                                                                     (match (cadr pair)
+                                                                       [`(has-type ,_
+                                                                                   ,type)
+                                                                        type])
+                                                                     ext-env))
+                                                       env
+                                                       typed-pairs))
+                            body)
+              (match typed-body
+                [`(has-type ,_ ,type)
+                 `(has-type (let ,typed-pairs
+                              ,typed-body)
+                            ,type)]))]
+          [`(,func ,params ...)
+           (let ((func-typed (recur func))
+                 (params-typed (map recur params)))
+             (let ((func-type (get-type func-typed)))
+               (match func-type
+                 [`(Function ,param-types ,return-type)
+                  (if (not (equal? (map get-type params-typed)
+                                   param-types))
+                      (type-error 'user-func param-types (map get-type params-typed))
+                      `(has-type (,func-typed ,@params-typed) ,return-type))])))]
+          )))))
 
 (debug-define typecheck-R4
   (typecheck-R4-curry '()))
@@ -1424,6 +1493,7 @@
    select-instructions
    flatten
    expose-allocation
+   reveal-functions
    uniquify
    typecheck-R4
    ))
@@ -1470,6 +1540,7 @@
          select-instructions
          flatten
          expose-allocation
+         reveal-functions
          uniquify
          typecheck-R4
          u-state

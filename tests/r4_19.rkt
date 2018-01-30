@@ -1,7 +1,7 @@
-(define (big [a : Integer] [b : Integer] [c : Integer] [d : Integer] [e : Integer] 
+(define (big [a : Integer] [b : Integer] [c : Integer] [d : Integer] [e : Integer]
              [f : Integer] [g : Integer] [h : Integer] [i : Integer] [j : Integer]) : Integer
         (+ d j))
-(define (big2 [a : Integer] [b : Integer] [c : Integer] [d : Integer] [e : Integer] 
+(define (big2 [a : Integer] [b : Integer] [c : Integer] [d : Integer] [e : Integer]
               [f : Integer] [g : Integer] [h : Integer]) : Integer
         (+ d h))
 (let ([a (big 1 2 3 0 5 6 7 8 9 1)])
@@ -25,24 +25,24 @@
                                     (let ([s (big2 1 2 3 1 5 6 7 0)])
                                       (let ([t 1])
                                         (let ([u 1])
-                                          (+ a 
-                                          (+ b 
-                                          (+ c 
-                                          (+ d 
-                                          (+ e 
-                                          (+ f 
-                                          (+ g 
-                                          (+ h 
-                                          (+ i 
-                                          (+ j 
-                                          (+ k 
-                                          (+ l 
-                                          (+ m 
-                                          (+ n 
+                                          (+ a
+                                          (+ b
+                                          (+ c
+                                          (+ d
+                                          (+ e
+                                          (+ f
+                                          (+ g
+                                          (+ h
+                                          (+ i
+                                          (+ j
+                                          (+ k
+                                          (+ l
+                                          (+ m
+                                          (+ n
                                           (+ o
-                                          (+ p 
-                                          (+ q 
-                                          (+ r 
-                                          (+ s 
-                                          (+ t 
+                                          (+ p
+                                          (+ q
+                                          (+ r
+                                          (+ s
+                                          (+ t
                                           (+ u 21))))))))))))))))))))))))))))))))))))))))))

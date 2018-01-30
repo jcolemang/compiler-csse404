@@ -43,12 +43,17 @@
 ;; (let ((test-prog '(program (vector-ref vector-ref (vector (vector 42 32)) 0) 1))))
 ;;   (display (run-all test-prog)))
 (let ((test-prog '(program
-                   (define (mult [x : Integer] [y : Integer]) : Integer
-                     (if (eq? 0 x)
-                         0
-                         (+ y (mult (+ (- 1) x) y))))
-                   (mult 6 7))))
 
+                   (define (id [x : Integer]) : Integer x)
+
+                   (define (f [n : Integer] [clos : (Vector (Integer -> Integer) (Vector Integer))]) : Integer
+                     (if (eq? n 100)
+                         ((vector-ref clos 0) (vector-ref (vector-ref clos 1) 0))
+                         (f (+ n 1) (vector (vector-ref clos 0) (vector-ref clos 1)))))
+
+                   (f 0 (vector id (vector 42)))
+
+                   )))
   (display (run-all test-prog)))
 
 ;; (let ((test-prog '(program (let ([a 1])

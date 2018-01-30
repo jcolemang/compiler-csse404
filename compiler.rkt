@@ -521,7 +521,7 @@
                    (let ((ref-sym (gensym 'func-ref)))
                      (values `((assign ,ref-sym ,exp))
                              ref-sym
-                             `(,ref-sym . ,type)))]
+                             `((,ref-sym . ,type))))]
                   [`(let ((,x ,assgn)) ,body)
                    (let-values ([(assgn-assignments assgn-value assgn-vars)
                                  (recur assgn)]
@@ -650,12 +650,14 @@
                                   (map cadr flat))))]))))
 
 (define get-param-locations
-  (lambda (num)
+  (lambda (num caller-view?)
     (let* ((regs (map (lambda (x)
                         `(reg ,x))
                       '(rdi rsi rdx rcx r8 r9)))
            (stacks (map (lambda (x)
-                          `(deref (reg rbp) ,(* -8 (add1 x))))
+                          (if caller-view?
+                              `(deref rsp ,(* 8 x))
+                              `(deref rbp ,(* 8 (+ 2 x)))))
                         (range (- num (length regs))))))
       (take (append regs stacks) num))))
 
@@ -705,7 +707,7 @@
                    `((movq ,(expand val1) (var ,var))
                      (addq ,(expand val2) (var ,var)))]
                   [`(app ,rator ,rands ...)
-                   (let ((locs (get-param-locations (length rands))))
+                   (let ((locs (get-param-locations (length rands) #t)))
                      `(,@(map (lambda (loc val)
                                 `(movq ,(expand val)
                                        ,loc))
@@ -773,13 +775,15 @@
                                                     vars)
             (,@(map (lambda (loc param-name)
                       `(movq ,loc (var ,param-name)))
-                    (get-param-locations (length params))
+                    (get-param-locations (length params) #f)
                     (map car params))
              ,@(concat-map expand body)))]))))
 
 (define get-offset
   (lambda (var vars)
     (* -16 (index-of vars var))))
+
+
 
 ;; I should add register saves and such here. callq should save all caller save
 ;; registers, and this should add pushs and pops at the top of all functions. In
@@ -788,43 +792,50 @@
   (lambda (prog)
     (match prog
       [`(program (type ,type) ,stack-num ,defines ,instrs)
-       `(program ,stack-num
-                 ,(map add-bookkeeping defines)
-                 ((label-pos prelude)
-                  (pushq (reg rbp))
-                  (pushq (reg rax))
-                  (movq (reg rsp) (reg rbp))
-                  (subq (int ,stack-num) (reg rsp))
-                  (movq (int 2048) (reg rdi))
-                  (movq (int 1024) (reg rsi))
-                  (callq initialize)
-                  (movq (global-value rootstack_begin) (reg r15))
-                  (movq (int 0) (deref r15 0))
-                  (label-pos endprelude)
-                  ,@instrs
-                  (label-pos conclusion)
-                  (movq (reg rax) (reg rdi))
-                  (literal ,(print-by-type type))
-                  (addq (int ,stack-num) (reg rsp))
-                  (popq (reg rax))
-                  (and (int 0) (reg rax))
-                  (popq (reg rbp))
-                  (retq)))]
-      [`(define (,name ,params ...) : ,type ,stack-num ,instrs)
-       `(define (,name ,@params) ,stack-num
-          ((pushq (reg rbp))
-           (movq (reg rsp) (reg rbp))
-           ,@(map (lambda (reg)
-                    `(pushq (reg ,reg)))
-                  callee-save-regs)
-           (subq (int ,stack-num) (reg rsp))
-           ,@instrs
-           (addq (int ,stack-num) (reg rsp))
-           ,@(map (lambda (reg)
-                    `(popq (reg ,reg)))
-                  (reverse callee-save-regs))
-           (popq (reg rbp))
-           (retq)))])))
+       (let ((max-def-stack-n (* 8 (apply max 0 (map get-stack-num defines)))))
+         `(program ,stack-num
+                   ,(map (add-bookkeeping-def max-def-stack-n) defines)
+                   ((label-pos prelude)
+                    (pushq (reg rbp))
+                    (pushq (reg rax))
+                    (movq (reg rsp) (reg rbp))
+                    (subq (int ,(+ stack-num max-def-stack-n)) (reg rsp))
+                    (movq (int 2048) (reg rdi))
+                    (movq (int 65536) (reg rsi))
+                    (callq initialize)
+                    (movq (global-value rootstack_begin) (reg r15))
+                    (movq (int 0) (deref r15 0))
+                    (label-pos endprelude)
+                    ,@instrs
+                    (label-pos conclusion)
+                    (movq (reg rax) (reg rdi))
+                    (literal ,(print-by-type type))
+                    (addq (int ,(+ stack-num max-def-stack-n)) (reg rsp))
+                    (popq (reg rax))
+                    (and (int 0) (reg rax))
+                    (popq (reg rbp))
+                    (retq))))]
+      )))
+
+(define add-bookkeeping-def
+  (lambda (max-stack-n)
+    (lambda (def)
+      (match def
+        [`(define (,name ,params ...) : ,type ,stack-num ,instrs)
+         `(define (,name ,@params) ,stack-num
+            ((pushq (reg rbp))
+             (movq (reg rsp) (reg rbp))
+             ,@(map (lambda (reg)
+                      `(pushq (reg ,reg)))
+                    callee-save-regs)
+             (subq (int ,(+ stack-num max-stack-n)) (reg rsp))
+             ,@instrs
+             (addq (int ,(+ stack-num max-stack-n)) (reg rsp))
+             ,@(map (lambda (reg)
+                      `(popq (reg ,reg)))
+                    (reverse callee-save-regs))
+             (popq (reg rbp))
+             (retq)))]))))
 
 
 (define patch-instruction
@@ -1226,6 +1237,15 @@
 
 (define word-size 8)
 
+(define get-stack-num
+  (lambda (def)
+    (match def
+      [`(define (,_ ,vars ...) : ,_ ...)
+       (max 0 (- (length vars) 6))]
+      ;; [`(define (,_ ,params ...) : ,_ ,_ ,_ ,_)
+      ;;  (max 0 (- (length vars) 6))]
+      )))
+
 ;; need to add mappings to actual registers as well as stack locations
 (debug-define allocate-registers
   (letrec ((assign-reg
@@ -1260,13 +1280,13 @@
                          [_ (cons (caar instrs)
                                   rest)]))))))
     (letrec ((get-stuff
-              (lambda (type typed-vars graph instrs)
+              (lambda (type typed-vars graph instrs max-args-num)
                 (--> get-color-var <- car
                      get-color-num <- cdr
                      colors <- (color-graph graph)
                      num-colors <- (if (null? colors)
                                        0
-                                       (apply max (map get-color-num colors)))
+                                       (apply max 0 (map get-color-num colors)))
                      all-regs <- (append caller-save-regs
                                          callee-save-regs)
                      num-regs <- (length all-regs)
@@ -1277,14 +1297,15 @@
                                                (if (>= (get-color-num color)
                                                        num-regs)
                                                    `(deref rsp ,(* word-size
-                                                                   (- color-num
-                                                                      num-regs)))
+                                                                   (+ max-args-num
+                                                                      (- color-num
+                                                                         num-regs))))
                                                    `(reg ,(list-ref all-regs
                                                                     color-num))))))
                                      colors)
                      reg-map <- (make-immutable-hasheqv reg-mapping)
                      (values (let ((stack-num (- (add1 num-colors)
-                                                 (length caller-save-regs))))
+                                                 (length all-regs))))
                                (max (* stack-num word-size) 0))
                              (map (lambda (vars)
                                     (concat-map (lambda (var)
@@ -1295,23 +1316,28 @@
                                                 vars))
                                   (map cadr instrs))
                              (map (assign-reg reg-map)
-                                  (rem-live-vars instrs)))))))
+                                  (rem-live-vars instrs))))))
+             (allocate-def (lambda (max-args-num)
+                             (lambda (def)
+                               (match def
+                                 [`(define (,name ,params ...) : ,type ,typed-vars ,graph ,body)
+                                  (let-values ([(stack-num reg-mappings new-instrs)
+                                                (get-stuff type typed-vars graph body max-args-num)])
+                                    `(define (,name ,@params) :
+                                       ,type ,typed-vars ,stack-num ,reg-mappings ,new-instrs))])))))
       (lambda (prog)
         (match prog
           [`(program ,type ,typed-vars ,graph ,defines ,instrs)
-           (let-values ([(stack-num reg-mappings new-instrs)
-                         (get-stuff type typed-vars graph instrs)])
-           `(program ,type
-                     ,typed-vars
-                     ,stack-num
-                     ,reg-mappings
-                     ,(map allocate-registers defines)
-                     ,new-instrs))]
-          [`(define (,name ,params ...) : ,type ,typed-vars ,graph ,body)
-           (let-values ([(stack-num reg-mappings new-instrs)
-                         (get-stuff type typed-vars graph body)])
-             `(define (,name ,@params) :
-                ,type ,typed-vars ,stack-num ,reg-mappings ,new-instrs))])))))
+           (let ((max-args-num (apply max 0 (map get-stack-num defines))))
+             (let-values ([(stack-num reg-mappings new-instrs)
+                           (get-stuff type typed-vars graph instrs max-args-num)])
+               `(program ,type
+                         ,typed-vars
+                         ,stack-num
+                         ,reg-mappings
+                         ,(map (allocate-def max-args-num) defines)
+                         ,new-instrs)))]
+          )))))
 
 ;; this will need modification if the saves and restores are to be offset by
 ;; more than a single instruction.
@@ -1420,8 +1446,20 @@
   (lambda (def)
     (match def
       [`(define (,name ,params ...) : ,type ,_)
-       `(,name Function ,(map caddr params)
-               ,type)])))
+       `(,name Function ,(map (compose parse-type caddr) params)
+               ,(parse-type type))])))
+
+(define parse-type
+  (lambda (type)
+    (if (list? type)
+        (if (eq? (car type) 'Vector)
+            (cons 'Vector (map parse-type (cdr type)))
+            (let* ([arrowless (filter-not (lambda (x) (eq? x '->)) type)]
+                   [ret-type (parse-type (car (reverse arrowless)))]
+                   [arg-types (map parse-type (reverse (cdr (reverse arrowless))))])
+              `(Function ,arg-types ,ret-type)))
+        type)))
+
 
 (define typecheck-R4-curry
   (lambda (env)
@@ -1442,12 +1480,12 @@
            (let ((typed-body ((typecheck-R4-curry
                                (extend-env-vars (map (lambda (wrong-cell)
                                                        (cons (car wrong-cell)
-                                                             (caddr wrong-cell)))
+                                                             (parse-type (caddr wrong-cell))))
                                                      vars)
                                                 env)) body)))
-             (if (not (equal? type (get-type typed-body)))
-                 (type-error name type (get-type typed-body))
-                 `(define (,name ,@vars) : ,type ,typed-body)))]
+             (if (not (equal? (parse-type type) (get-type typed-body)))
+                 (type-error name (parse-type type) (get-type typed-body))
+                 `(define (,name ,@vars) : ,(parse-type type) ,typed-body)))]
           [(? fixnum?)
            `(has-type ,exp Integer)]
           [(? boolean?)

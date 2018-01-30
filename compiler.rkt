@@ -298,11 +298,11 @@
                                (map (lambda (x) (cons (caadr x) (caadr x))) defines)
                                built-ins)
                               0)
-          uniq-defs <- (map (uniquify-def init-env) defines)
-          uniq-bodies <- (map (uniquify-exp init-env) instrs)
-          `(program ,type
-                    ,uniq-defs
-                    ,uniq-bodies))])))
+            uniq-defs <- (map (uniquify-def init-env) defines)
+            uniq-bodies <- (map (uniquify-exp init-env) instrs)
+            `(program ,type
+                      ,uniq-defs
+                      ,uniq-bodies))])))
 
 (define type-and-exp
   (lambda (exp)
@@ -324,17 +324,17 @@
         (match def
           [`(define (,name ,vars ...) : ,type ,body)
            (--> renamed-vars <- (map (lambda (formal) (cons formal (gensym))) (map car vars))
-              new-env <- (extend-env-vars renamed-vars assoc-list)
-              new-vars <- (map (lambda (var)
-                                (match var [`(,var-name : ,type)
-                                            `(,(variable-lookup var-name new-env) : ,type)]))
-                              vars)
-              `(define (,name ,@new-vars) : ,type
-                 ,((uniquify-exp
-                   (struct-copy u-state
-                                state
-                                (assoc-list new-env)))
-                   body)))])))))
+                new-env <- (extend-env-vars renamed-vars assoc-list)
+                new-vars <- (map (lambda (var)
+                                   (match var [`(,var-name : ,type)
+                                               `(,(variable-lookup var-name new-env) : ,type)]))
+                                 vars)
+                `(define (,name ,@new-vars) : ,type
+                   ,((uniquify-exp
+                      (struct-copy u-state
+                                   state
+                                   (assoc-list new-env)))
+                     body)))])))))
 
 (define uniquify-exp
   (lambda (state)
@@ -377,9 +377,9 @@
     (match prog
       [`(program ,type ,defs ,bodies)
        (--> func-names <- (map caadr defs)
-          revealed-defs <- (map (reveal-def func-names) defs)
-          revealed-bodies <- (map (reveal-exp func-names) bodies)
-          `(program ,type ,revealed-defs ,revealed-bodies))])))
+            revealed-defs <- (map (reveal-def func-names) defs)
+            revealed-bodies <- (map (reveal-exp func-names) bodies)
+            `(program ,type ,revealed-defs ,revealed-bodies))])))
 
 (define reveal-def
   (lambda (func-names)
@@ -944,8 +944,8 @@
            (live-before
             (lambda (curr-instr live-after)
               (--> reads  <- (get-read-vars curr-instr)
-                 writes <- (get-written-vars curr-instr)
-                 (set-calculation reads writes live-after))))
+                   writes <- (get-written-vars curr-instr)
+                   (set-calculation reads writes live-after))))
            (live-after-prime
             (lambda (instrs live-after)
               (let ((curr (car instrs)))

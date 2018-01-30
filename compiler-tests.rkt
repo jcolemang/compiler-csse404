@@ -165,6 +165,35 @@
   (test-suite
    "Testing my own absurd functions"
 
+   (check-equal? (get-param-locations 1)
+                 '((reg rdi)))
+   (check-equal? (get-param-locations 6)
+                 '((reg rdi)
+                   (reg rsi)
+                   (reg rdx)
+                   (reg rcx)
+                   (reg r8)
+                   (reg r9)))
+   (check-equal? (get-param-locations 7)
+                 '((reg rdi)
+                   (reg rsi)
+                   (reg rdx)
+                   (reg rcx)
+                   (reg r8)
+                   (reg r9)
+                   (deref (reg rbp) -8)))
+   (check-equal? (get-param-locations 10)
+                 '((reg rdi)
+                   (reg rsi)
+                   (reg rdx)
+                   (reg rcx)
+                   (reg r8)
+                   (reg r9)
+                   (deref (reg rbp) -8)
+                   (deref (reg rbp) -16)
+                   (deref (reg rbp) -24)
+                   (deref (reg rbp) -32)))
+
    (check-equal? (concat-map identity
                              '((1)
                                (2)
@@ -225,21 +254,28 @@
                            (select-instructions ,select-instructions nothing)
                            (flatten             ,flatten             nothing)
                            (expose-allocation   ,expose-allocation   nothing)
+                           (reveal-functions    ,reveal-functions    nothing)
                            (uniquify            ,uniquify            nothing))))
       (type-checker typecheck-R4))
-  (compiler-tests "r1-compiler"
-                  type-checker
-                  compiler
-                  "r1"
-                  (range 1 49))
-  (compiler-tests "r2-compiler"
-                  type-checker
-                  compiler
-                  "r2"
-                  (range 1 60))
+  ;; (compiler-tests "r1-compiler"
+  ;;                 type-checker
+  ;;                 compiler
+  ;;                 "r1"
+  ;;                 (range 1 49))
+  ;; (compiler-tests "r2-compiler"
+  ;;                 type-checker
+  ;;                 compiler
+  ;;                 "r2"
+  ;;                 (range 1 60))
 
-  (compiler-tests "r3-compiler"
+  ;; (compiler-tests "r3-compiler"
+  ;;                 type-checker
+  ;;                 compiler
+  ;;                 "r3"
+  ;;                 (range 1 36))
+
+  (compiler-tests "r4-compiler"
                   type-checker
                   compiler
-                  "r3"
-                  (range 1 36)))
+                  "r4"
+                  (range 1 39)))

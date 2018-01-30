@@ -23,7 +23,7 @@
 
 ;; My helpers
 
-(define-for-syntax DEBUGGING #t)
+(define-for-syntax DEBUGGING #f)
 
 (define-syntax debug-define
   (lambda (exp)
@@ -295,7 +295,7 @@
     (match prog
       [`(program ,type ,defines ,instrs)
        (--> init-env <- (u-state (extend-env-vars
-                               (map (lambda (x) (cons (caadr x) (caadr x))) defines)
+                               (map (lambda (x) (cons (caadr x) (gensym 'userfunc))) defines)
                                built-ins)
                               0)
             uniq-defs <- (map (uniquify-def init-env) defines)
@@ -329,7 +329,7 @@
                                    (match var [`(,var-name : ,type)
                                                `(,(variable-lookup var-name new-env) : ,type)]))
                                  vars)
-                `(define (,name ,@new-vars) : ,type
+                `(define (,(variable-lookup name new-env) ,@new-vars) : ,type
                    ,((uniquify-exp
                       (struct-copy u-state
                                    state
@@ -409,7 +409,7 @@
                          (match (get-type operator)
                            [`(Function ,arg-types ,ret-type)
                             `(app ,(recur operator) ,@(map recur operands))]
-                           [_ exp])]
+                           [_ `(,operator ,@(map recur operands))])]
                         [x x]) ,type))))))
 
 (debug-define expose-allocation
@@ -461,7 +461,8 @@
                 [(or `(has-type ,_ built-in)
                      `(has-type ,(? integer?) Integer)
                      `(has-type ,(? symbol?) ,_)
-                     `(has-type ,(? boolean?) Boolean))
+                     `(has-type ,(? boolean?) Boolean)
+                     `(has-type (function-ref ,_) ,_))
                  typed-exp]
                 [`(has-type ((has-type vector ,_) ,typed-exps ...) ,type)
                  (--> ided-typed-exps <- (map (lambda (typed-exp)
@@ -485,14 +486,21 @@
                                 ,(expose-helper true)
                                 ,(expose-helper false))
                             ,type)]
+                [`(has-type (app ,rator ,rands ...) ,type)
+                 `(has-type (app ,(expose-helper rator)
+                                 ,@(map expose-helper rands)) ,type)]
                 [`(has-type (,exps ...) ,type)
                  `(has-type ,(map expose-helper exps) ,type)]))))
     (lambda (prog)
       (match prog
         [`(program ,output-type
+                   ,defines
                    ,exps)
          `(program ,output-type
-                   ,(map expose-helper exps))]))))
+                   ,(map expose-allocation defines)
+                   ,(map expose-helper exps))]
+        [`(define (,name ,params ...) : ,return-type ,body)
+         `(define (,name ,@params) : ,return-type ,(expose-helper body))]))))
 
 
 (debug-define flatten
@@ -509,6 +517,11 @@
                    (values '() exp `((,exp . ,type)))]
                   [`(allocate ,bytes ,type)
                    (values '() exp '())]
+                  [`(function-ref ,func-name)
+                   (let ((ref-sym (gensym 'func-ref)))
+                     (values `((assign ,ref-sym ,exp))
+                             ref-sym
+                             `(,ref-sym . ,type)))]
                   [`(let ((,x ,assgn)) ,body)
                    (let-values ([(assgn-assignments assgn-value assgn-vars)
                                  (recur assgn)]
@@ -576,12 +589,12 @@
                              exp-result
                              `((,exp-result . ,type)
                                ,@(concat-map caddr results))))]
-                  [`(,rator ,(? integer? x) ...)
-                   (let ((new-sym (gensym 'app-return-int)))
-                     (values `((assign ,new-sym ,exp))
-                             new-sym
-                             `((,new-sym . ,type))))]
-                  [`(,rator ,rands ...)
+                  ;; [`(,rator ,(? integer? x) ...)
+                  ;;  (let ((new-sym (gensym 'app-return-int)))
+                  ;;    (values `((assign ,new-sym ,exp))
+                  ;;            new-sym
+                  ;;            `((,new-sym . ,type))))]
+                  [`(app ,rator ,rands ...)
                    (let-values ([(results)
                                  (map (lambda (exp)
                                         (let-values ([(assignments value vars)
@@ -597,29 +610,54 @@
                      (values `(,@(concat-map car results)
                                ,@rator-assgns
                                (assign ,rator-result ,rator-value)
-                               (assign ,result-var (,rator-result
-                                                    ,@(map cadr results))))
+                               (assign ,result-var (app ,rator-result
+                                                        ,@(map cadr results))))
                              result-var
-                             `(,rator-result
-                               ,result-var
+                             `((,rator-result . ,(get-type rator))
+                               (,result-var . ,type)
                                ,@(concat-map caddr results))))])))))
     (lambda (exp)
       (match exp
-        [`(program ,type ,exps)
+        [`(program ,type ,defines ,exps)
          (let ((flat (map (lambda (exp)
                             (let-values ([(assignments value vars)
                                           (recur exp)])
                               `(,assignments ,value ,vars)))
-                          exps)))
+                          exps))
+               (defines-flats
+                 (map (lambda (def)
+                        (match def
+                          [`(define (,name ,params ...) : ,ret-type ,body)
+                           (let-values ([(assignments value vars)
+                                         (recur body)])
+                             `(define (,name ,@params) : ,ret-type
+                                ,(filter-not (lambda (x)
+                                               (member (car x)
+                                                       (map car params)))
+                                             vars)
+                                (,@assignments
+                                 (return ,value))))]))
+                      defines)))
            `(program ,type
                      ,(foldl set-insert
                              '()
                              (concat-map caddr flat))
+                     ,defines-flats
                      ,(concat-map (lambda (assgns val)
                                     `(,@assgns
                                       (return ,val)))
                                   (map car flat)
                                   (map cadr flat))))]))))
+
+(define get-param-locations
+  (lambda (num)
+    (let* ((regs (map (lambda (x)
+                        `(reg ,x))
+                      '(rdi rsi rdx rcx r8 r9)))
+           (stacks (map (lambda (x)
+                          `(deref (reg rbp) ,(* -8 (add1 x))))
+                        (range (- num (length regs))))))
+      (take (append regs stacks) num))))
 
 (debug-define select-instructions
   (lambda (prog)
@@ -661,9 +699,20 @@
              (expand-into-var
               (lambda (exp var)
                 (match exp
+                  [`(function-ref ,func)
+                   `((leaq (function-ref ,func) (var ,var)))]
                   [`(+ ,val1 ,val2)
                    `((movq ,(expand val1) (var ,var))
                      (addq ,(expand val2) (var ,var)))]
+                  [`(app ,rator ,rands ...)
+                   (let ((locs (get-param-locations (length rands))))
+                     `(,@(map (lambda (loc val)
+                                `(movq ,(expand val)
+                                       ,loc))
+                              locs
+                              rands)
+                       (indirect-callq (var ,rator))
+                       (movq (reg rax) (var ,var))))]
                   [`(read)
                    `((callq read_int)
                      (movq (reg rax) (var ,var)))]
@@ -712,43 +761,25 @@
                   [val
                    `((movq ,(expand val) (var ,var)))]))))
       (match prog
-        [`(program ,type ,vars ,code)
+        [`(program ,type ,vars ,defines ,code)
          `(program ,type
                    ,vars
-                   ,(concat-map expand code))]))))
+                   ,(map select-instructions defines)
+                   ,(concat-map expand code))]
+        [`(define (,name ,params ...) : ,type ,vars ,body)
+         `(define (,name ,@params) : ,type ,(append (map cons
+                                                         (map car params)
+                                                         (map caddr params))
+                                                    vars)
+            (,@(map (lambda (loc param-name)
+                      `(movq ,loc (var ,param-name)))
+                    (get-param-locations (length params))
+                    (map car params))
+             ,@(concat-map expand body)))]))))
 
 (define get-offset
   (lambda (var vars)
     (* -16 (index-of vars var))))
-
-;; this will need modification if the saves and restores are to be offset by
-;; more than a single instruction.
-(debug-define add-register-saves
-  (let ((helper
-         (lambda (live-regss instrs)
-           (let ((to-backup (map (lambda (live-regs instr)
-                                   (match instr
-                                     [`(callq ,func-name)
-                                      (filter caller-save? live-regs)]
-                                     [_ '()]))
-                                 live-regss
-                                 instrs)))
-             (concat-map (lambda (backups instr)
-                           `(,@(map (lambda (reg)
-                                      `(pushq (reg ,reg)))
-                                    backups)
-                             ,instr
-                             ,@(map (lambda (reg)
-                                      `(popq (reg ,reg)))
-                                    (reverse backups))))
-                         to-backup
-                         instrs)))))
-    (lambda (prog)
-      (match prog
-        [`(program ,type ,typed-vars ,num ,live-varss ,instrs)
-         `(program ,type
-                   ,num
-                   ,(helper live-varss instrs))]))))
 
 ;; I should add register saves and such here. callq should save all caller save
 ;; registers, and this should add pushs and pops at the top of all functions. In
@@ -756,8 +787,9 @@
 (debug-define add-bookkeeping
   (lambda (prog)
     (match prog
-      [`(program (type ,type) ,stack-num ,instrs)
+      [`(program (type ,type) ,stack-num ,defines ,instrs)
        `(program ,stack-num
+                 ,(map add-bookkeeping defines)
                  ((label-pos prelude)
                   (pushq (reg rbp))
                   (pushq (reg rax))
@@ -777,7 +809,22 @@
                   (popq (reg rax))
                   (and (int 0) (reg rax))
                   (popq (reg rbp))
-                  (retq)))])))
+                  (retq)))]
+      [`(define (,name ,params ...) : ,type ,stack-num ,instrs)
+       `(define (,name ,@params) ,stack-num
+          ((pushq (reg rbp))
+           (movq (reg rsp) (reg rbp))
+           ,@(map (lambda (reg)
+                    `(pushq (reg ,reg)))
+                  callee-save-regs)
+           (subq (int ,stack-num) (reg rsp))
+           ,@instrs
+           (addq (int ,stack-num) (reg rsp))
+           ,@(map (lambda (reg)
+                    `(popq (reg ,reg)))
+                  (reverse callee-save-regs))
+           (popq (reg rbp))
+           (retq)))])))
 
 
 (define patch-instruction
@@ -815,20 +862,32 @@
 (debug-define patch-instructions
   (lambda (prog)
     (match prog
-      [`(program ,x ,insts)
-       `(program ,x
-                 ,(concat-map patch-instruction insts))])))
+      [`(program ,stack-num ,defines ,insts)
+       `(program ,stack-num
+                 ,(map patch-instructions defines)
+                 ,(concat-map patch-instruction insts))]
+      [`(define (,name ,params ...) ,stack-num ,insts)
+       `(define (,name ,@params) ,stack-num
+          ,(concat-map patch-instruction insts))])))
 
 (define print-instructions
   (lambda (prog)
     (match prog
-      [`(program ,stack-num ,insts)
+      [`(program ,stack-num ,defines ,insts)
        (apply string-append
               (intercalate "\n"
-                           `("	.globl main"
+                           `(,@(map print-instructions defines)
+                             "	.globl main"
                              "main:"
                              ,@(map print-instructions insts)
                              "\n")))]
+      [`(define (,name ,params ...) ,stack-num ,insts)
+       (apply string-append
+              (intercalate "\n"
+                           `(,(format "	.globl ~a" name)
+                             ,(format "~a:" name)
+                             ,@(map print-instructions insts)
+                             "\n\n")))]
       [`(literal ,str) str]
       [`(reg ,reg) (format "%~a" reg)]
       [`(byte-reg ,reg) (format "%~a" reg)]
@@ -845,6 +904,10 @@
        (format "	je	~a" (print-instructions location))]
       [`(sete ,reg)
        (format "	~a	~a" 'sete (print-instructions reg))]
+      [`(function-ref ,name)
+       (format "~a(%rip)" name)]
+      [`(indirect-callq ,arg)
+       (format "	callq	*~a" (print-instructions arg))]
       [`(,rator ,inst1 ,inst2)
        (format "	~a	~a,	~a"
                rator
@@ -886,8 +949,10 @@
          (std-two-arg-reads instr)]
         [`(neg ,_) (std-one-arg-reads instr)]
         [`(not ,_) (std-one-arg-reads instr)]
+        [`(indirect-callq ,_) (std-one-arg-reads instr)]
         [(or `(restore-vectors-from-root-stack)
              `(spill-vectors-to-root-stack)
+             `(leaq ,_ ,_)
              `(sete ,_)
              `(setle ,_)
              `(setge ,_)
@@ -911,6 +976,7 @@
              `(eq? ,_ ,_)
              `(cmpq ,_ ,_)
              `(xorq ,_ ,_)
+             `(leaq ,_ ,_)
              `(movzbq ,_ ,_))
          (std-two-arg-writes instr)]
         [`(callq ,_) '()]
@@ -920,6 +986,7 @@
          `(,var)]
         [(or `(restore-vectors-from-root-stack)
              `(spill-vectors-to-root-stack)
+             `(indirect-callq ,_)
              `(sete ,_)
              `(setl ,_)
              `(setg ,_)
@@ -993,8 +1060,12 @@
 (debug-define uncover-live
   (lambda (prog)
     (match prog
-      [`(program ,type ,x ,instrs)
-       `(program ,type ,x ,(live-after-sets instrs))])))
+      [`(program ,type ,x ,defines ,instrs)
+       `(program ,type ,x
+                 ,(map uncover-live defines)
+                 ,(live-after-sets instrs))]
+      [`(define (,name ,params ...) : ,type ,vars ,body)
+       `(define (,name ,@params) : ,type ,vars ,(live-after-sets body))])))
 
 (define add-interference-edges
   (lambda (instr live-vars graph)
@@ -1014,7 +1085,8 @@
                   (add-nodes `(,s ,d) graph))]
       [(or `(movq ,_ (var ,d))
            `(neg (var ,d))
-           `(movzbq ,_ (var ,d)))
+           `(movzbq ,_ (var ,d))
+           `(leaq ,_ (var ,d)))
        (add-edges (filter (lambda (v)
                             (not (eqv? v d)))
                           live-vars)
@@ -1022,6 +1094,7 @@
                   (add-nodes `(,d) graph))]
       [(or `(spill-vectors-to-root-stack)
            `(restore-vectors-from-root-stack)
+           `(indirect-callq ,_)
            `(callq ,_)
            `(movq ,_ ,_)
            `(cmpq ,_ ,_)
@@ -1064,44 +1137,56 @@
 (debug-define build-interference
   (lambda (prog)
     (match prog
-      [`(program ,type ,typed-vars ,instrs)
+      [`(program ,type ,typed-vars ,defines ,instrs)
        `(program ,type
                  ,typed-vars
                  ,(construct-graph instrs)
-                 ,instrs)])))
+                 ,(map build-interference defines)
+                 ,instrs)]
+      [`(define (,name ,params ...) : ,type ,vars ,body)
+       `(define (,name ,@params) : ,type
+          ,vars
+          ,(construct-graph body)
+          ,body)])))
 
 (debug-define manage-root-stack
   (lambda (prog)
-    (match prog
-      [`(program ,type ,typed-vars ,graph ,instrs)
-       (letrec ((helper
-                 (lambda (instr)
-                   (match instr
-                     [`((spill-vectors-to-root-stack) ,live-vars)
-                      (concat-map (lambda (live-var)
-                                    (let ((var-type (cdr (assv live-var typed-vars))))
-                                      (match var-type
-                                        [`(Vector ,vec-types ...)
-                                         `(((movq (var ,live-var) (deref r15 0)) ,live-vars)
-                                           ((addq (int 8) (reg r15)) ,live-vars))]
-                                        [x (list)])))
-                                    (sort live-vars symbol<?))]
-                     [`((restore-vectors-from-root-stack) ,live-vars)
-                      (concat-map (lambda (live-var)
-                                    (let ((var-type (cdr (assv live-var typed-vars))))
-                                      (match var-type
-                                        [`(Vector ,vec-types ...)
-                                         `(((addq (int -8) (reg r15)) ,live-vars)
-                                           ((movq (deref r15 0) (var ,live-var)) ,live-vars))]
-                                         [_ (list)])))
-                                  (reverse (sort live-vars symbol<?)))]
-                     [`((if ,test ,true ,false) ,live-vars)
-                      `(((if ,test
-                             ,(concat-map helper true)
-                             ,(concat-map helper false))
-                         ,live-vars))]
-                     [x (list x)]))))
-         `(program ,type ,typed-vars ,graph ,(concat-map helper instrs)))])))
+    (letrec ((helper
+              (lambda (typed-vars)
+                (lambda (instr)
+                  (match instr
+                    [`((spill-vectors-to-root-stack) ,live-vars)
+                     (concat-map (lambda (live-var)
+                                   (let ((var-type (cdr (assv live-var typed-vars))))
+                                     (match var-type
+                                       [`(Vector ,vec-types ...)
+                                        `(((movq (var ,live-var) (deref r15 0)) ,live-vars)
+                                          ((addq (int 8) (reg r15)) ,live-vars))]
+                                       [x (list)])))
+                                 (sort live-vars symbol<?))]
+                    [`((restore-vectors-from-root-stack) ,live-vars)
+                     (concat-map (lambda (live-var)
+                                   (let ((var-type (cdr (assv live-var typed-vars))))
+                                     (match var-type
+                                       [`(Vector ,vec-types ...)
+                                        `(((addq (int -8) (reg r15)) ,live-vars)
+                                          ((movq (deref r15 0) (var ,live-var)) ,live-vars))]
+                                       [_ (list)])))
+                                 (reverse (sort live-vars symbol<?)))]
+                    [`((if ,test ,true ,false) ,live-vars)
+                     `(((if ,test
+                            ,(concat-map (helper typed-vars) true)
+                            ,(concat-map (helper typed-vars) false))
+                        ,live-vars))]
+                    [x (list x)])))))
+      (match prog
+        [`(program ,type ,typed-vars ,graph ,defines ,instrs)
+         `(program ,type ,typed-vars ,graph
+                   ,(map manage-root-stack defines)
+                   ,(concat-map (helper typed-vars) instrs))]
+        [`(define (,name ,params ...) : ,type ,typed-vars ,graph ,body)
+         `(define (,name ,@params) : ,type ,typed-vars ,graph
+            ,(concat-map (helper typed-vars) body))]))))
 
 (define caller-save?
   (lambda (reg)
@@ -1119,13 +1204,13 @@
 ;; I don't actually know what r11 is for, but see 5.3.3 for info
 (define caller-save-regs
   '(
-    rdx
-    rcx
+    ;; rdx
+    ;; rcx
     ;; rsi
     ;; rdi
-    r8
-    r9
-    r10
+    ;; r8
+    ;; r9
+    ;; r10
     ;; r11
     ))
 
@@ -1174,49 +1259,91 @@
                                 rest)]
                          [_ (cons (caar instrs)
                                   rest)]))))))
+    (letrec ((get-stuff
+              (lambda (type typed-vars graph instrs)
+                (--> get-color-var <- car
+                     get-color-num <- cdr
+                     colors <- (color-graph graph)
+                     num-colors <- (if (null? colors)
+                                       0
+                                       (apply max (map get-color-num colors)))
+                     all-regs <- (append caller-save-regs
+                                         callee-save-regs)
+                     num-regs <- (length all-regs)
+                     reg-mapping <- (map
+                                     (lambda (color)
+                                       (let ((color-num (cdr color)))
+                                         (cons (get-color-var color)
+                                               (if (>= (get-color-num color)
+                                                       num-regs)
+                                                   `(deref rsp ,(* word-size
+                                                                   (- color-num
+                                                                      num-regs)))
+                                                   `(reg ,(list-ref all-regs
+                                                                    color-num))))))
+                                     colors)
+                     reg-map <- (make-immutable-hasheqv reg-mapping)
+                     (values (let ((stack-num (- (add1 num-colors)
+                                                 (length caller-save-regs))))
+                               (max (* stack-num word-size) 0))
+                             (map (lambda (vars)
+                                    (concat-map (lambda (var)
+                                                  (match (hash-ref reg-map var)
+                                                    [`(reg ,reg)
+                                                     `(,reg)]
+                                                    [_ '()]))
+                                                vars))
+                                  (map cadr instrs))
+                             (map (assign-reg reg-map)
+                                  (rem-live-vars instrs)))))))
       (lambda (prog)
         (match prog
-          [`(program ,type ,typed-vars ,graph ,instrs)
-           (--> get-color-var <- car
-                get-color-num <- cdr
-                colors <- (color-graph graph)
-                num-colors <- (if (null? colors)
-                                  0
-                                  (apply max (map get-color-num colors)))
-                all-regs <- (append caller-save-regs
-                                    callee-save-regs)
-                num-regs <- (length all-regs)
-                reg-mapping <- (map
-                                (lambda (color)
-                                  (let ((color-num (cdr color)))
-                                    (cons (get-color-var color)
-                                          (if (>= (get-color-num color)
-                                                  num-regs)
-                                              `(deref rsp ,(* word-size
-                                                              (- color-num
-                                                                 num-regs)))
-                                              `(reg ,(list-ref all-regs
-                                                               color-num))))))
-                                colors)
-                reg-map <- (make-immutable-hasheqv reg-mapping)
-                `(program ,type
-                          ,typed-vars
-                          ,(let ((stack-num (- (add1 num-colors)
-                                               (length caller-save-regs))))
-                             (max (* stack-num word-size) 0))
-                          ,(map (lambda (vars)
-                                  (concat-map (lambda (var)
-                                                (match (hash-ref reg-map var)
-                                                  [`(reg ,reg)
-                                                   `(,reg)]
-                                                  [_ '()]))
-                                              vars))
-                                (map cadr instrs))
-                          ;; ,live-vars
-                          ,(map (assign-reg reg-map)
-                                (rem-live-vars instrs))))]))))
+          [`(program ,type ,typed-vars ,graph ,defines ,instrs)
+           (let-values ([(stack-num reg-mappings new-instrs)
+                         (get-stuff type typed-vars graph instrs)])
+           `(program ,type
+                     ,typed-vars
+                     ,stack-num
+                     ,reg-mappings
+                     ,(map allocate-registers defines)
+                     ,new-instrs))]
+          [`(define (,name ,params ...) : ,type ,typed-vars ,graph ,body)
+           (let-values ([(stack-num reg-mappings new-instrs)
+                         (get-stuff type typed-vars graph body)])
+             `(define (,name ,@params) :
+                ,type ,typed-vars ,stack-num ,reg-mappings ,new-instrs))])))))
 
-(define lower-conditionals
+;; this will need modification if the saves and restores are to be offset by
+;; more than a single instruction.
+(debug-define add-register-saves
+  (let ((helper
+         (lambda (live-regss instrs)
+           (let ((to-backup (map (lambda (live-regs instr)
+                                   (match instr
+                                     [`(callq ,func-name)
+                                      (filter caller-save? live-regs)]
+                                     [_ '()]))
+                                 live-regss
+                                 instrs)))
+             (concat-map (lambda (backups instr)
+                           `(,@(map (lambda (reg)
+                                      `(pushq (reg ,reg)))
+                                    backups)
+                             ,instr
+                             ,@(map (lambda (reg)
+                                      `(popq (reg ,reg)))
+                                    (reverse backups))))
+                         to-backup
+                         instrs)))))
+    (lambda (prog)
+      (match prog
+        [`(program ,type ,typed-vars ,num ,live-varss ,defines ,instrs)
+         `(program ,type
+                   ,num
+                   ,defines
+                   ,(helper live-varss instrs))]))))
+
+(debug-define lower-conditionals
   (letrec ((lower-condition
             (lambda (instr)
               (match instr
@@ -1237,11 +1364,20 @@
                 [_ (list instr)]))))
     (lambda (prog)
       (match prog
-        [`(program ,type ,stack-num ,instrs)
+        [`(program ,type ,stack-num ,defines ,instrs)
          `(program ,type
                    ,stack-num
+                   ,(map lower-conditionals defines)
                    ,(concat-map lower-condition
-                                instrs))]))))
+                                instrs))]
+        [`(define (,name ,params ...) :
+            ,type ,typed-vars ,stack-num ,reg-mappings ,instrs)
+         `(define (,name ,@params) :
+            ,type ,stack-num
+            ,(concat-map lower-condition instrs))]))))
+
+    ;; `(define (,name ,@params) :
+    ;;    ,type ,typed-vars ,stack-num ,reg-mappings ,new-instrs))])))))
 
 (define extend-env
   (lambda (var val env)
@@ -1528,6 +1664,7 @@
          >>=
          concat-map
 
+         get-param-locations
          lower-conditionals
          print-instructions
          patch-instructions

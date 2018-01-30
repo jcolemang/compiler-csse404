@@ -4,7 +4,7 @@
 #include <assert.h>
 #include "runtime.h"
 
-#define NDEBUG 1
+#define NDEBUG 0
 // To do: we need to account for the "any" type. -Jeremy
 
 // Often misunderstood: static global variables in C are not

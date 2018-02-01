@@ -429,28 +429,30 @@
 
 (define free-variables
   (lambda (typed-exp)
-                (let-values ([(exp type)
-                              (type-and-exp typed-exp)])
-                  (match exp
-                    [(? symbol?) `((,exp . ,type))]
-                    [(? integer?) '()]
-                    [(? boolean?) '()]
-                    [`(function-ref ,name) '()]
-                    [`(if ,test ,true ,false)
-                     (append (free-variables test)
-                             (free-variables true)
-                             (free-variables false))]
-                    [`(lambda ,params : ,type ,body)
-                     (filter-not (lambda (x) (member (car x) (map car params)))
-                                 (free-variables body))]
-                    [`(app ,rator ,rands ...)
-                     (concat-map free-variables `(,rator ,@rands))]
-                    [`(,rator ,rands ...)
-                     (concat-map free-variables rands)]
-                    [`(let ((,name ,val)) ,body)
-                     (filter-not (lambda (sym) (eqv? name (car sym)))
-                                 (free-variables body))])
-                  )))
+    (let-values ([(exp type)
+                  (type-and-exp typed-exp)])
+      (match exp
+        [(? symbol?) `((,exp . ,type))]
+        [(? integer?) '()]
+        [(? boolean?) '()]
+        [`(function-ref ,name) '()]
+        [`(if ,test ,true ,false)
+         (append (free-variables test)
+                 (free-variables true)
+                 (free-variables false))]
+        [`(lambda ,params : ,type ,body)
+         (filter-not (lambda (x) (member (car x) (map car params)))
+                     (free-variables body))]
+        [`(let ((,name ,val)) ,body)
+         (append
+          (filter-not (lambda (sym) (eqv? name (car sym)))
+                      (free-variables body))
+          (free-variables val))]
+        [`(app ,rator ,rands ...)
+         (concat-map free-variables `(,rator ,@rands))]
+        [`(,rator ,rands ...)
+         (concat-map free-variables rands)]
+        ))))
 
 (define make-def-from-lambda
   (lambda (lam free-vars vec-type)

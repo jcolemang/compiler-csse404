@@ -254,6 +254,7 @@
                            (select-instructions ,select-instructions nothing)
                            (flatten             ,flatten             nothing)
                            (expose-allocation   ,expose-allocation   nothing)
+                           (convert-to-closures ,convert-to-closures nothing)
                            (reveal-functions    ,reveal-functions    nothing)
                            (uniquify            ,uniquify            nothing))))
       (type-checker typecheck-R4))
@@ -274,8 +275,14 @@
   ;;                 "r3"
   ;;                 (range 1 36))
 
-  (compiler-tests "r4-compiler"
+  ;; (compiler-tests "r4-compiler"
+  ;;                 type-checker
+  ;;                 compiler
+  ;;                 "r4"
+  ;;                 (range 1 39))
+
+  (compiler-tests "r5-compiler"
                   type-checker
                   compiler
-                  "r4"
-                  (range 1 39)))
+                  "r5"
+                  (range 1 13)))

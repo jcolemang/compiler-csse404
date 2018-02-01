@@ -427,7 +427,7 @@
                            [_ `(,operator ,@(map recur operands))])]
                         [x x]) ,type))))))
 
-(debug-define free-variables
+(define free-variables
   (lambda (typed-exp)
                 (let-values ([(exp type)
                               (type-and-exp typed-exp)])
@@ -441,7 +441,7 @@
                              (free-variables true)
                              (free-variables false))]
                     [`(lambda ,params : ,type ,body)
-                     (filter-not (lambda (x) (member x (map car params)))
+                     (filter-not (lambda (x) (member (car x) (map car params)))
                                  (free-variables body))]
                     [`(app ,rator ,rands ...)
                      (concat-map free-variables `(,rator ,@rands))]
@@ -476,15 +476,17 @@
 ;; the form, and the other is the resultant form. Lambdas will be replaced with
 ;; vectors, and defines will just be appended onto the list.
 (debug-define convert-to-closures
-  (letrec ([convert-defines-to-closures
+  (letrec ([convert-define-to-closures
             (lambda (def)
               (match def
                 [`(define (,name ,params ...) : ,type ,body)
                  (let-values ([(body-defines new-body)
                               (convert-exp-to-closures body)])
+                   (let* ((new-formal (gensym 'closure-placeholder)))
                    (values body-defines
-                           `(define (,name ,@params) : ,type
-                              ,new-body)))]))]
+                           `(define (,name (,new-formal : (Vector (Function ,(map caddr params)
+                                                                            ,type))) ,@params) : ,type
+                              ,new-body))))]))]
            [convert-exp-to-closures
             (lambda (typed-exp)
               (let-values ([(exp type)
@@ -495,7 +497,11 @@
                         [(? symbol?) (values '() exp)]
                         [(? integer?) (values '() exp)]
                         [(? boolean?) (values '() exp)]
-                        [`(function-ref ,_) (values '() exp)]
+                        [`(function-ref ,_)
+                         (let ((old-type type))
+                           (set! type `(Vector ,type))
+                           (values '() `((has-type vector built-in)
+                                         (has-type ,exp ,old-type))))]
                         [`(lambda ,params : ,ret-type ,body)
                          (let-values ([(body-defines new-body)
                                        (convert-exp-to-closures body)])
@@ -503,12 +509,26 @@
                                   (vec-type `(Vector ,type ,@(map cdr free-vars)))
                                   (new-def (make-def-from-lambda exp free-vars vec-type))
                                   (old-type type))
-                             (set! type vec-type)
-                             (values `(,new-def)
-                                     `((has-type vector built-in) (has-type (function-ref ,(caadr new-def)) ,old-type)
-                                                        ,@(map (lambda (x) `(has-type ,(car x) ,(cdr x))) free-vars))
+                             (match new-def
+                               [`(define (,name ,params ...) : ,new-def-type ,new-def-body)
 
-                                     )))]
+                                (let-values ([(new-def-body-defs new-new-def-body)
+                                              (convert-exp-to-closures new-def-body)])
+                                  (let ((new-new-def
+                                         `(define (,name ,@params) : ,new-def-type ,new-new-def-body)))
+                                    (set! type vec-type)
+                                    (values `(,new-new-def ,@new-def-body-defs)
+                                            `((has-type vector built-in) (has-type (function-ref ,(caadr new-new-def)) ,old-type)
+                                              ,@(map (lambda (x) `(has-type ,(car x) ,(cdr x))) free-vars))
+
+                                            )))])))]
+                        [`(let ((,var ,val)) ,body)
+                         (let-values ([(val-defines new-val)
+                                       (convert-exp-to-closures val)]
+                                      [(body-defines new-body)
+                                       (convert-exp-to-closures body)])
+                           (values (append val-defines body-defines)
+                                   `(let ((,var ,new-val)) ,new-body)))]
                         [`(if ,test ,true ,false)
                          (let-values ([(test-defines new-test)
                                        (convert-exp-to-closures test)]
@@ -526,7 +546,7 @@
                          (let-values ([(rator-defines new-rator)
                                        (convert-exp-to-closures rator)]
                                       [(rands-defines new-rands)
-                                       (convert-list-to-closures rands)])
+                                       (convert-list-to-closures rands convert-exp-to-closures)])
                            (values (append rator-defines rands-defines)
                                    (let ((temp (gensym 'app-temp)))
                                      `(let ([,temp ,new-rator])
@@ -534,22 +554,23 @@
                                                                   (has-type ,temp ,(get-type new-rator))
                                                                   (has-type 0 Integer))
                                                                  ,(get-type rator))
+                                                       (has-type ,temp ,(get-type new-rator))
                                                        ,@new-rands)
                                                   ,type)))))]
 
                         [`(,rator ,rands ...)
                          (let-values ([(rands-defines new-rands)
-                                       (convert-list-to-closures rands)])
+                                       (convert-list-to-closures rands convert-exp-to-closures)])
                            (values rands-defines
                                    `(,rator ,@new-rands)))]
                         )]
                      )
                   (values defines `(has-type ,new-exp ,type)))))]
            [convert-list-to-closures
-            (lambda (exps)
+            (lambda (exps conversion-func)
               (let ((exps-values (map (lambda (exp)
                                          (let-values ([(exp-defines new-exp)
-                                                       (convert-exp-to-closures exp)])
+                                                       (conversion-func exp)])
                                            (cons exp-defines new-exp)))
                                        exps)))
                 (values (concat-map car exps-values)
@@ -558,9 +579,9 @@
       (match prog
         [`(program ,type ,defs ,bodies)
          (let-values ([(defs-defines new-defs)
-                       (convert-list-to-closures defs)]
+                       (convert-list-to-closures defs convert-define-to-closures)]
                       [(bodies-defines new-bodies)
-                       (convert-list-to-closures bodies)])
+                       (convert-list-to-closures bodies convert-exp-to-closures)])
                          `(program ,type
                                    ,(append new-defs defs-defines bodies-defines)
                                    ,new-bodies))]))))
@@ -1691,9 +1712,9 @@
                                                                         param-types)
                                                                    env))
                               body)))
-             (if (not (equal? (get-type typed-body) type))
+             (if (not (equal? (get-type typed-body) (parse-type type)))
                  (type-error 'lambda type (get-type typed-body))
-                 `(has-type (lambda ,(map (lambda (name type) `(,name : ,type))
+                 `(has-type (lambda ,(map (lambda (name type) `(,name : ,(parse-type type)))
                                      param-names
                                      param-types) :
                               ,(parse-type type)

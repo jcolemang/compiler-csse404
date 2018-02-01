@@ -44,8 +44,14 @@
 ;;   (display (run-all test-prog)))
 
 (let ((test-prog '(program
-                   ((lambda: ([x : Integer]) : Integer x)
-                    1))))
+
+                   ((lambda: ([x : Integer]) : Integer x) 42)
+                   ;; (((lambda: ([x : Integer]) : (Integer -> Integer)
+                   ;;            (lambda: ([y : Integer]) : Integer x)) 42) 444)
+
+                   )))
+  ;; ((lambda: ([x : Integer]) : Integer x)
+                   ;;  (+ 1 2)))))
   (display (run-all test-prog)))
 
 ;; (let ((test-prog '(program

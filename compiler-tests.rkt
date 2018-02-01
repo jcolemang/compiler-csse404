@@ -258,28 +258,28 @@
                            (reveal-functions    ,reveal-functions    nothing)
                            (uniquify            ,uniquify            nothing))))
       (type-checker typecheck-R4))
-  ;; (compiler-tests "r1-compiler"
-  ;;                 type-checker
-  ;;                 compiler
-  ;;                 "r1"
-  ;;                 (range 1 49))
-  ;; (compiler-tests "r2-compiler"
-  ;;                 type-checker
-  ;;                 compiler
-  ;;                 "r2"
-  ;;                 (range 1 60))
+  (compiler-tests "r1-compiler"
+                  type-checker
+                  compiler
+                  "r1"
+                  (range 1 49))
+  (compiler-tests "r2-compiler"
+                  type-checker
+                  compiler
+                  "r2"
+                  (range 1 60))
 
-  ;; (compiler-tests "r3-compiler"
-  ;;                 type-checker
-  ;;                 compiler
-  ;;                 "r3"
-  ;;                 (range 1 36))
+  (compiler-tests "r3-compiler"
+                  type-checker
+                  compiler
+                  "r3"
+                  (range 1 36))
 
-  ;; (compiler-tests "r4-compiler"
-  ;;                 type-checker
-  ;;                 compiler
-  ;;                 "r4"
-  ;;                 (range 1 39))
+  (compiler-tests "r4-compiler"
+                  type-checker
+                  compiler
+                  "r4"
+                  (range 1 39))
 
   (compiler-tests "r5-compiler"
                   type-checker

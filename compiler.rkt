@@ -351,12 +351,14 @@
                         [(? symbol?)
                          (or (variable-lookup exp assoc-list)
                              (error 'uniquify-exp "Unbound variable: ~a" exp))]
-                        [`(lambda ,params ,body)
+                        [`(lambda ([,param-names : ,param-types] ...) : ,type ,body)
                          (let* ((new-param-names (map (lambda (_) (gensym))
-                                                      params))
-                                (new-env (extend-env-vars (map cons params new-param-names)
+                                                      param-names))
+                                (new-env (extend-env-vars (map cons param-names new-param-names)
                                                           assoc-list)))
-                           `(lambda ,new-param-names
+                           `(lambda ,(map (lambda (name type) `(,name : ,type))
+                                     new-param-names
+                                     param-types) : ,type
                               ,((uniquify-exp
                                  (struct-copy u-state
                                               state
@@ -414,8 +416,8 @@
                          `(if ,(recur test)
                               ,(recur true)
                               ,(recur false))]
-                        [`(lambda ,params ,body)
-                         `(lambda ,params ,(recur body))]
+                        [`(lambda ,params : ,type ,body)
+                         `(lambda ,params : ,type ,(recur body))]
                         [`(let ([,var ,val]) ,body)
                          `(let ([,var ,(recur val)]) ,(recur body))]
                         [`(,operator ,operands ...)
@@ -427,85 +429,132 @@
 
 (define free-variables
   (trace-lambda (typed-exp)
-    (let-values ([(exp type)
-                  (type-and-exp typed-exp)])
-      `(has-type
-        ,(match exp
-           [(? symbol?) `(,exp)]
-           [(? integer?) '()]
-           [(? boolean?) '()]
-           [`(function-ref ,name) '()]
-           [`(if ,test ,true ,false)
-            (append (free-variables test)
-                    (free-variables true)
-                    (free-variables false))]
-           [`(lambda ,params ,body)
-            (filter-not (lambda (x) (member x params))
-                        (free-variables body))]
-           [`(app ,rator ,rands ...)
-            (concat-map free-variables `(,rator ,@rands))]
-           [`(,rator ,rands ...)
-            (concat-map free-variables rands)]
-           [`(let ((,name ,val)) ,body)
-            (filter-not (lambda (sym) (eqv? name sym))
-                        (free-variables body))])
-        ,type))))
+                (let-values ([(exp type)
+                              (type-and-exp typed-exp)])
+                  (match exp
+                    [(? symbol?) `((,exp . ,type))]
+                    [(? integer?) '()]
+                    [(? boolean?) '()]
+                    [`(function-ref ,name) '()]
+                    [`(if ,test ,true ,false)
+                     (append (free-variables test)
+                             (free-variables true)
+                             (free-variables false))]
+                    [`(lambda ,params ,body)
+                     (filter-not (lambda (x) (member x (map car params)))
+                                 (free-variables body))]
+                    [`(app ,rator ,rands ...)
+                     (concat-map free-variables `(,rator ,@rands))]
+                    [`(,rator ,rands ...)
+                     (concat-map free-variables rands)]
+                    [`(let ((,name ,val)) ,body)
+                     (filter-not (lambda (sym) (eqv? name (car sym)))
+                                 (free-variables body))])
+                  )))
+
+(define make-def-from-lambda
+  (trace-lambda (lam free-vars vec-type)
+    (match lam
+      [`(lambda ,params : ,type ,body)
+       (let ((name (gensym 'lambda))
+             (closure-name (gensym 'closure)))
+         (letrec ((assign-free-vars
+                   (lambda (free-vars i)
+                     (if (null? free-vars)
+                         body
+                         `(has-type (let ([,(caar free-vars) (has-type
+                                                              ((has-type vector-ref built-in)
+                                                               (has-type ,closure-name ,vec-type)
+                                                               (has-type ,i Integer))
+                                                              ,(cdar free-vars))])
+                            ,(assign-free-vars (cdr free-vars) (add1 i))) ,type)))))
+           `(define (,name (,closure-name : ,vec-type) ,@params) : ,type
+              ,(assign-free-vars free-vars 1))))])))
+
 
 ;; two values returned from each function. One is every new define created by
 ;; the form, and the other is the resultant form. Lambdas will be replaced with
 ;; vectors, and defines will just be appended onto the list.
 (debug-define convert-to-closures
-  (letrec ((convert-defines-to-closures
+  (letrec ([convert-defines-to-closures
             (trace-lambda (def)
               (match def
                 [`(define (,name ,params ...) : ,type ,body)
-                 `(define (,name ,@params) : ,type
-                    ,(convert-exp-to-closures body))])))
-           (convert-exp-to-closures
+                 (let-values ([(body-defines new-body)
+                              (convert-exp-to-closures body)])
+                   (values body-defines
+                           `(define (,name ,@params) : ,type
+                              ,new-body)))]))]
+           [convert-exp-to-closures
             (trace-lambda (typed-exp)
               (let-values ([(exp type)
                             (type-and-exp typed-exp)])
-                `(has-type
-                  ,(match exp
-                     [(? symbol?) (values '() exp)]
-                     [`(lambda ,params ,body)
-                      (let-values ([(body-defines new-body)
-                                    (convert-exp-to-closures body)])
-                        (let ((free-vars (set->list (list->set (free-variables body)))))
-                           `(lambda ,params ,body)))]
-                     [`(if ,test ,true ,false)
-                      (let-values ([(test-defines new-test)
-                                    (convert-exp-to-closures test)]
-                                   [(true-defines new-true)
-                                    (convert-exp-to-closures true)]
-                                   [(false-defines new-false)
-                                    (convert-exp-to-closures false)])
-                        (values (append test-defines
-                                        true-defines
-                                        false-defines)
-                                `(if ,new-test
-                                     ,new-true
-                                     ,new-false)))]
-                     [`(app ,rator ,rands ...)
-                      (let-values ([(rator-defines new-rator)
-                                    (convert-exp-to-closures rator)])
-                        (let ((rands-values (map (lambda (rand)
-                                                   (let-values ([(rand-defines new-rand)
-                                                                 (convert-exp-to-closures rand)])
-                                                     (cons rand-defines new-rand)))
-                                                 rands)))
-                          (values (append rator-defines
-                                          (concat-map car rands-values))
-                                  `(,new-rator ,@(map cdr rands-values)))))])
+                (let-values
+                    ([(defines new-exp)
+                      (match exp
+                        [(? symbol?) (values '() exp)]
+                        [(? integer?) (values '() exp)]
+                        [(? boolean?) (values '() exp)]
+                        [`(function-ref ,_) (values '() exp)]
+                        [`(lambda ,params : ,ret-type ,body)
+                         (let-values ([(body-defines new-body)
+                                       (convert-exp-to-closures body)])
+                           (let* ((free-vars (set->list (list->set (free-variables body))))
+                                  (vec-type `(Vector ,type ,@(map cdr free-vars)))
+                                  (new-def (make-def-from-lambda exp free-vars vec-type)))
+                             (values `(,new-def)
+                                     `(has-type ((has-type vector built-in) (has-type ,(caadr new-def) ,type)
+                                                        ,@(map (lambda (x) `(has-type ,(car x) ,(cdr x))) free-vars))
+                                                ,vec-type)
+                                     )))]
+                        [`(if ,test ,true ,false)
+                         (let-values ([(test-defines new-test)
+                                       (convert-exp-to-closures test)]
+                                      [(true-defines new-true)
+                                       (convert-exp-to-closures true)]
+                                      [(false-defines new-false)
+                                       (convert-exp-to-closures false)])
+                           (values (append test-defines
+                                           true-defines
+                                           false-defines)
+                                   `(if ,new-test
+                                        ,new-true
+                                        ,new-false)))]
+                        [`(app ,rator ,rands ...)
+                         (let-values ([(rator-defines new-rator)
+                                       (convert-exp-to-closures rator)]
+                                      [(rands-defines new-rands)
+                                       (convert-list-to-closures rands)])
+                           (values (append rator-defines rands-defines)
+                                   `(app ,new-rator ,@new-rands)))]
 
-                  ,type)))))
+                        [`(,rator ,rands ...)
+                         (let-values ([(rands-defines new-rands)
+                                       (convert-list-to-closures rands)])
+                           (values rands-defines
+                                   `(,rator ,@new-rands)))]
+                        )]
+                     )
+                  (values defines `(has-type ,new-exp ,type)))))]
+           [convert-list-to-closures
+            (trace-lambda (exps)
+              (let ((exps-values (map (lambda (exp)
+                                         (let-values ([(exp-defines new-exp)
+                                                       (convert-exp-to-closures exp)])
+                                           (cons exp-defines new-exp)))
+                                       exps)))
+                (values (concat-map car exps-values)
+                        (map cdr exps-values))))])
     (lambda (prog)
       (match prog
         [`(program ,type ,defs ,bodies)
-         ;; (let-values ([(define-
-         `(program ,type
-                   ,(map convert-defines-to-closures defs)
-                   ,(map convert-exp-to-closures bodies))]))))
+         (let-values ([(defs-defines new-defs)
+                       (convert-list-to-closures defs)]
+                      [(bodies-defines new-bodies)
+                       (convert-list-to-closures bodies)])
+                         `(program ,type
+                                   ,(append new-defs defs-defines bodies-defines)
+                                   ,new-bodies))]))))
 
 (debug-define expose-allocation
   (letrec ((let-nester
@@ -1634,7 +1683,10 @@
                               body)))
              (if (not (equal? (get-type typed-body) type))
                  (type-error 'lambda type (get-type typed-body))
-                 `(has-type (lambda ,param-names
+                 `(has-type (lambda ,(map (lambda (name type) `(,name : ,type))
+                                     param-names
+                                     param-types) :
+                              ,(parse-type type)
                               ,typed-body)
                             (Function ,(map parse-type param-types) ,(parse-type type)))))]
           [`(- ,arg)

@@ -23,7 +23,7 @@
 
 ;; My helpers
 
-(define-for-syntax DEBUGGING #t)
+(define-for-syntax DEBUGGING #f)
 
 (define-syntax debug-define
   (lambda (exp)
@@ -427,8 +427,8 @@
                            [_ `(,operator ,@(map recur operands))])]
                         [x x]) ,type))))))
 
-(define free-variables
-  (trace-lambda (typed-exp)
+(debug-define free-variables
+  (lambda (typed-exp)
                 (let-values ([(exp type)
                               (type-and-exp typed-exp)])
                   (match exp
@@ -440,7 +440,7 @@
                      (append (free-variables test)
                              (free-variables true)
                              (free-variables false))]
-                    [`(lambda ,params ,body)
+                    [`(lambda ,params : ,type ,body)
                      (filter-not (lambda (x) (member x (map car params)))
                                  (free-variables body))]
                     [`(app ,rator ,rands ...)
@@ -453,7 +453,7 @@
                   )))
 
 (define make-def-from-lambda
-  (trace-lambda (lam free-vars vec-type)
+  (lambda (lam free-vars vec-type)
     (match lam
       [`(lambda ,params : ,type ,body)
        (let ((name (gensym 'lambda))
@@ -477,7 +477,7 @@
 ;; vectors, and defines will just be appended onto the list.
 (debug-define convert-to-closures
   (letrec ([convert-defines-to-closures
-            (trace-lambda (def)
+            (lambda (def)
               (match def
                 [`(define (,name ,params ...) : ,type ,body)
                  (let-values ([(body-defines new-body)
@@ -486,7 +486,7 @@
                            `(define (,name ,@params) : ,type
                               ,new-body)))]))]
            [convert-exp-to-closures
-            (trace-lambda (typed-exp)
+            (lambda (typed-exp)
               (let-values ([(exp type)
                             (type-and-exp typed-exp)])
                 (let-values
@@ -499,13 +499,15 @@
                         [`(lambda ,params : ,ret-type ,body)
                          (let-values ([(body-defines new-body)
                                        (convert-exp-to-closures body)])
-                           (let* ((free-vars (set->list (list->set (free-variables body))))
+                           (let* ((free-vars (set->list (list->set (free-variables typed-exp))))
                                   (vec-type `(Vector ,type ,@(map cdr free-vars)))
-                                  (new-def (make-def-from-lambda exp free-vars vec-type)))
+                                  (new-def (make-def-from-lambda exp free-vars vec-type))
+                                  (old-type type))
+                             (set! type vec-type)
                              (values `(,new-def)
-                                     `(has-type ((has-type vector built-in) (has-type ,(caadr new-def) ,type)
+                                     `((has-type vector built-in) (has-type (function-ref ,(caadr new-def)) ,old-type)
                                                         ,@(map (lambda (x) `(has-type ,(car x) ,(cdr x))) free-vars))
-                                                ,vec-type)
+
                                      )))]
                         [`(if ,test ,true ,false)
                          (let-values ([(test-defines new-test)
@@ -526,7 +528,14 @@
                                       [(rands-defines new-rands)
                                        (convert-list-to-closures rands)])
                            (values (append rator-defines rands-defines)
-                                   `(app ,new-rator ,@new-rands)))]
+                                   (let ((temp (gensym 'app-temp)))
+                                     `(let ([,temp ,new-rator])
+                                        (has-type (app (has-type ((has-type vector-ref built-in)
+                                                                  (has-type ,temp ,(get-type new-rator))
+                                                                  (has-type 0 Integer))
+                                                                 ,(get-type rator))
+                                                       ,@new-rands)
+                                                  ,type)))))]
 
                         [`(,rator ,rands ...)
                          (let-values ([(rands-defines new-rands)
@@ -537,7 +546,7 @@
                      )
                   (values defines `(has-type ,new-exp ,type)))))]
            [convert-list-to-closures
-            (trace-lambda (exps)
+            (lambda (exps)
               (let ((exps-values (map (lambda (exp)
                                          (let-values ([(exp-defines new-exp)
                                                        (convert-exp-to-closures exp)])
@@ -555,6 +564,7 @@
                          `(program ,type
                                    ,(append new-defs defs-defines bodies-defines)
                                    ,new-bodies))]))))
+
 
 (debug-define expose-allocation
   (letrec ((let-nester

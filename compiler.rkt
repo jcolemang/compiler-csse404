@@ -323,7 +323,8 @@
             (same-state-uniquify (uniquify-exp state)))
         (match def
           [`(define (,name ,vars ...) : ,type ,body)
-           (--> renamed-vars <- (map (lambda (formal) (cons formal (gensym))) (map car vars))
+           (--> renamed-vars <- (map (lambda (formal) (cons formal (gensym)))
+                                     (map car vars))
                 new-env <- (extend-env-vars renamed-vars assoc-list)
                 new-vars <- (map (lambda (var)
                                    (match var [`(,var-name : ,type)
@@ -384,6 +385,79 @@
                            `(,(f operator)
                              ,@(map f operands)))])
                      ,type))))))
+
+(define expand-cps
+  (letrec ((expand-form
+            (lambda (typed-form)
+              (let-values ([(form type)
+                            (type-and-exp typed-form)])
+                (match form
+                  [`(lambda ,vars
+                      : ,ret-type
+                      ,body)
+                   (let ((new-cont (gensym 'cont)))
+                     `(has-type (lambda [,@vars (,new-cont : (Function (,ret-type) Bottom))]
+                                  : ,ret-type
+                                  ,(transform-form body new-cont))
+                                (Function (,ret-type) Bottom)))]))))
+           (transform-form
+            (lambda (typed-form ret-continuation)
+              (let-values ([(form type)
+                            (type-and-exp typed-form)])
+                (match form
+                  [(or (? integer?)
+                       (? boolean?))
+                   `(has-type (,ret-continuation ,typed-form)
+                              ,type)]
+                  [`(has-type ,(? symbol?) ,var-type)
+                   `(has-type (,ret-continuation ,typed-form)
+                              ,type)]
+                  [`((has-type call/cc built-in) ,func)
+                   (let ((func-cont (gensym 'func-cont)))
+                     (transform-form func
+                                     `(has-type (lambda ([,func-cont : ,(get-type func)])
+                                                  : Bottom
+                                                  (has-type (,func-cont ,ret-continuation ,ret-continuation)
+                                                            Bottom))
+                                                (Function (,get-type func) Bottom))))]
+                  [`(lambda ,vars
+                      : ,ret-type
+                      ,body)
+                   `(,ret-continuation ,(expand-form typed-form))]
+                  [`((has-type ,exp built-in) ,rand1 ,rand2)
+                   (let ((rand1-cont (gensym 'rand1-cont))
+                         (rand2-cont (gensym 'rand2-cont)))
+                     (transform-form rand1
+                                     `(has-type (lambda ([,rand1-cont : Integer])
+                                                  : Bottom
+                                                  ,(transform-form rand2
+                                                                   `(has-type (lambda ([,rand2-cont : Integer])
+                                                                                : Bottom
+                                                                                (has-type (,ret-continuation (has-type ((has-type ,exp built-in)
+                                                                                                                        (has-type ,rand1-cont Integer)
+                                                                                                                        (has-type ,rand2-cont Integer))
+                                                                                                                       Integer))
+                                                                                          Bottom))
+                                                                              (Function (Integer) Bottom))))
+                                                (Function (Integer) Bottom))))]
+                  ))))
+           (cpsify-form
+            (lambda (return-type)
+              (lambda (form)
+                (let ((return-var (gensym 'return-value)))
+                  (transform-form form `(has-type (lambda ([,return-var : ,return-type]) : ,return-type
+                                                          (has-type ,return-var ,return-type))
+                                                  (Function (,return-type) ,return-type)))))))
+           (cpsify-define
+            (lambda (def)
+              (match def
+                [x x]))))
+    (lambda (prog)
+      (match prog
+        [`(program ,type ,defs ,bodies)
+         `(program ,type
+                   ,(map cpsify-define defs)
+                   ,(map (cpsify-form type) bodies))]))))
 
 (debug-define reveal-functions
   (lambda (prog)
@@ -1653,6 +1727,15 @@
                  `(program (type ,type)
                            ,typed-defines
                            ((has-type ,typed-body ,type)))]))]
+          [`(call/cc ,func)
+           (let ((typed-func (recur func)))
+             (match (get-type typed-func)
+               [`(Function (,arg-type) ,ret-type)
+                (match arg-type
+                  [`(Function (,arg-arg-type) ,arg-ret-type)
+                   `(has-type ((has-type call/cc built-in)
+                               ,typed-func)
+                              ,arg-arg-type)])]))]
           [`(define (,name ,vars ...) : ,type ,body)
            (let ((typed-body ((typecheck-R4-curry
                                (extend-env-vars (map (lambda (wrong-cell)
@@ -1842,7 +1925,11 @@
 (define built-ins
   (map (lambda (x)
          (cons x x))
-       '(+ - read < > <= >= eq? and not void vector-set! vector vector-ref)))
+       '(call/cc + - read
+                 < > <= >=
+                 eq? and not
+                 void
+                 vector-set! vector vector-ref)))
 
 (define run-all
   (compose
@@ -1860,6 +1947,7 @@
    expose-allocation
    convert-to-closures
    reveal-functions
+   expand-cps
    uniquify
    typecheck-R4
    ))

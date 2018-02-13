@@ -1793,6 +1793,14 @@
               `(Function ,arg-types ,ret-type)))
         type)))
 
+(define type-equal?
+  (lambda (left right)
+    (or (eqv? left 'Bottom)
+        (eqv? right 'Bottom)
+        (eqv? left right)
+        (and (list? left)
+             (list? right)
+             (andmap type-equal? left right)))))
 
 (define typecheck-R4-curry
   (lambda (env)
@@ -1815,9 +1823,11 @@
                [`(Function (,arg-type) ,ret-type)
                 (match arg-type
                   [`(Function (,arg-arg-type) ,arg-ret-type)
-                   `(has-type ((has-type call/cc built-in)
-                               ,typed-func)
-                              ,arg-arg-type)])]))]
+                   ;; (if (not (eqv? arg-ret-type 'Bottom))
+                       ;; (type-error 'call/cc 'Bottom arg-ret-type)
+                       `(has-type ((has-type call/cc built-in)
+                                   ,typed-func)
+                                  ,arg-arg-type)])]))]
           [`(define (,name ,vars ...) : ,type ,body)
            (let ((typed-body ((typecheck-R4-curry
                                (extend-env-vars (map (lambda (wrong-cell)
@@ -1825,7 +1835,7 @@
                                                              (parse-type (caddr wrong-cell))))
                                                      vars)
                                                 env)) body)))
-             (if (not (equal? (parse-type type) (get-type typed-body)))
+             (if (not (type-equal? (parse-type type) (get-type typed-body)))
                  (type-error name (parse-type type) (get-type typed-body))
                  `(define (,name ,@vars) : ,(parse-type type) ,typed-body)))]
           [(? fixnum?)
@@ -1864,7 +1874,7 @@
                [`((has-type ,_ (Vector ,vec-types ...))
                   (has-type ,_ ,exp-type))
                 (if (and (< idx (length vec-types))
-                         (equal? exp-type (list-ref vec-types idx)))
+                         (type-equal? exp-type (list-ref vec-types idx)))
                     `(has-type ((has-type vector-set! built-in)
                                 ,typed-vec-exp
                                 (has-type ,idx Integer)
@@ -1879,7 +1889,7 @@
                                                                         param-types)
                                                                    env))
                               body)))
-             (if (not (equal? (get-type typed-body) (parse-type type)))
+             (if (not (type-equal? (get-type typed-body) (parse-type type)))
                  (type-error 'lambda type (get-type typed-body))
                  `(has-type (lambda ,(map (lambda (name type) `(,name : ,(parse-type type)))
                                      param-names
@@ -1953,8 +1963,10 @@
                           `(Integer Integer))])]
           [`(not ,exp)
            (match (recur exp)
-             [`(has-type ,typed-exp Boolean)
-              `(has-type ((has-type not built-in) (has-type ,typed-exp Boolean)) Boolean)])]
+             [`(has-type ,typed-exp ,type)
+              (if (not (type-equal? type 'Boolean))
+                  (type-error 'not 'Boolean type)
+                  `(has-type ((has-type not built-in) (has-type ,typed-exp Boolean)) Boolean))])]
           [`(if ,test ,true ,false)
            (let ((test-typed (recur test))
                  (true-typed (recur true))
@@ -1995,7 +2007,7 @@
              (let ((func-type (get-type func-typed)))
                (match func-type
                  [`(Function ,param-types ,return-type)
-                  (if (not (equal? (map get-type params-typed)
+                  (if (not (type-equal? (map get-type params-typed)
                                    param-types))
                       (type-error 'user-func param-types (map get-type params-typed))
                       `(has-type (,func-typed ,@params-typed) ,return-type))])))]

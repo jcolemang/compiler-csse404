@@ -1,0 +1,20 @@
+
+(define (try [f : ((Integer -> Integer) -> Integer)]) : Integer
+  (call/cc (lambda: ([k : (Integer -> Integer)]) : Integer
+            (f k))))
+
+(define (fib [x : Integer]) : Integer
+  (if (eq? x 0)
+      0
+      (if (eq? x 1)
+          1
+          (+ (fib (+ x -1))
+            (fib (+ x -2))))))
+
+(define (safe-fib [x : Integer]) : Integer
+  (try (lambda: ([throw : (Integer -> Integer)]) : Integer
+              (if (< x 0)
+                  (throw -1)
+                  (fib x)))))
+
+(safe-fib (read))

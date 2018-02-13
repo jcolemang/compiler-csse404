@@ -256,6 +256,7 @@
                            (expose-allocation   ,expose-allocation   nothing)
                            (convert-to-closures ,convert-to-closures nothing)
                            (reveal-functions    ,reveal-functions    nothing)
+                           (expand-cps          ,expand-cps          nothing)
                            (uniquify            ,uniquify            nothing))))
       (type-checker typecheck-R4))
   (compiler-tests "r1-compiler"

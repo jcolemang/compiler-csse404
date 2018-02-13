@@ -44,8 +44,8 @@
 ;;   (display (run-all test-prog)))
 
 (let ((test-prog '(program
-                   (call/cc (lambda: ([k : (Integer -> Integer)]) : Integer
-                              (+ 1 (k 5))))
+                   (+ 10 (call/cc (lambda: ([k : (Integer -> Integer)]) : Integer
+                                           (+ 1 (k 5)))))
                    ;; (+ 1 2)
                    )))
   (display (run-all test-prog)))

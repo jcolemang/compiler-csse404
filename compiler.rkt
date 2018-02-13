@@ -386,8 +386,20 @@
                              ,@(map f operands)))])
                      ,type))))))
 
-(debug-define expand-cps
-  (letrec ((expand-form
+(define expand-cps
+  (letrec ((cpsify-rands
+            (lambda (rands names continuation)
+              (if (null? rands)
+                  continuation
+                  (cpsify-rands (cdr rands)
+                                (cdr names)
+                                ,(transform-form
+                                  (car rands)
+                                  `(has-type (lambda ([,(car names) : ,(get-type (car rands))])
+                                               : Bottom
+                                               ,continuation)
+                                             (Function (,(get-type (car rands))) Bottom)))))))
+           (expand-form
             (lambda (typed-form)
               (let-values ([(form type)
                             (type-and-exp typed-form)])
@@ -415,13 +427,23 @@
                    `(has-type (,ret-continuation ,typed-form)
                               ,type)]
                   [`((has-type call/cc built-in) ,func)
-                   (let ((func-cont (gensym 'func-cont)))
+                   (let ((func-cont (gensym 'func-cont))
+                         (inner-val (gensym 'inner-cont))
+                         (ignored-cont (gensym 'ignored-cont))
+                         (arg-type (match (get-type func)
+                                     [`(Function ((Function (,arg-type) ,_)) ,_)
+                                      arg-type])))
                      (transform-form func
                                      `(has-type (lambda ([,func-cont : ,(get-type func)])
                                                   : Bottom
                                                   (has-type ((has-type ,func-cont
                                                                        ,(get-type func))
-                                                             ,ret-continuation
+                                                             (has-type (lambda ([,inner-val : ,arg-type]
+                                                                                [,ignored-cont : (Function (,arg-type) Bottom)])
+                                                                         : Bottom
+                                                                         (has-type (,ret-continuation (has-type ,inner-val ,arg-type))
+                                                                                   Bottom))
+                                                                       (Function (,arg-type (Function (,arg-type) Bottom)) Bottom))
                                                              ,ret-continuation)
                                                             Bottom))
                                                 (Function (,(get-type func)) Bottom))))]
@@ -457,9 +479,10 @@
                                                   ,(transform-form rand
                                                                    `(has-type (lambda ([,rand-cont : ,rand-type])
                                                                                 : Bottom
-                                                                                (has-type (,ret-continuation (has-type ((has-type ,rator-cont ,rator-type)
-                                                                                                                        (has-type ,rand-cont ,rand-type))
-                                                                                                                       ,type))
+                                                                                (has-type ((has-type ,rator-cont ,rator-type)
+                                                                                           (has-type ,rand-cont ,rand-type)
+                                                                                           ,ret-continuation)
+                                                                                           ;; (has-type ,ret-continuation (Function (,rand-type) Bottom)))
                                                                                           Bottom))
                                                                               (Function (,rand-type) Bottom))))
                                                 (Function (,rator-type) Bottom))))]
@@ -2021,6 +2044,7 @@
          flatten
          expose-allocation
          reveal-functions
+         expand-cps
          uniquify
          typecheck-R4
          u-state

@@ -386,7 +386,7 @@
                              ,@(map f operands)))])
                      ,type))))))
 
-(define expand-cps
+(debug-define expand-cps
   (letrec ((expand-form
             (lambda (typed-form)
               (let-values ([(form type)
@@ -395,10 +395,12 @@
                   [`(lambda ,vars
                       : ,ret-type
                       ,body)
-                   (let ((new-cont (gensym 'cont)))
-                     `(has-type (lambda [,@vars (,new-cont : (Function (,ret-type) Bottom))]
+                   (let ((new-cont (gensym 'cont))
+                         (cont-type `(Function (,ret-type) Bottom)))
+                     `(has-type (lambda [,@vars (,new-cont : ,cont-type)]
                                   : ,ret-type
-                                  ,(transform-form body new-cont))
+                                  ,(transform-form body `(has-type ,new-cont
+                                                                   ,cont-type)))
                                 (Function (,ret-type) Bottom)))]))))
            (transform-form
             (lambda (typed-form ret-continuation)
@@ -409,7 +411,7 @@
                        (? boolean?))
                    `(has-type (,ret-continuation ,typed-form)
                               ,type)]
-                  [`(has-type ,(? symbol?) ,var-type)
+                  [(? symbol?)
                    `(has-type (,ret-continuation ,typed-form)
                               ,type)]
                   [`((has-type call/cc built-in) ,func)
@@ -417,13 +419,17 @@
                      (transform-form func
                                      `(has-type (lambda ([,func-cont : ,(get-type func)])
                                                   : Bottom
-                                                  (has-type (,func-cont ,ret-continuation ,ret-continuation)
+                                                  (has-type ((has-type ,func-cont
+                                                                       ,(get-type func))
+                                                             ,ret-continuation
+                                                             ,ret-continuation)
                                                             Bottom))
-                                                (Function (,get-type func) Bottom))))]
+                                                (Function (,(get-type func)) Bottom))))]
                   [`(lambda ,vars
                       : ,ret-type
                       ,body)
-                   `(,ret-continuation ,(expand-form typed-form))]
+                   `(has-type (,ret-continuation ,(expand-form typed-form))
+                              Bottom)]
                   [`((has-type ,exp built-in) ,rand1 ,rand2)
                    (let ((rand1-cont (gensym 'rand1-cont))
                          (rand2-cont (gensym 'rand2-cont)))
@@ -440,6 +446,24 @@
                                                                                           Bottom))
                                                                               (Function (Integer) Bottom))))
                                                 (Function (Integer) Bottom))))]
+                  [`(,rator ,rand)
+                   (let ((rator-cont (gensym 'rator))
+                         (rand-cont (gensym 'rand))
+                         (rator-type (get-type rator))
+                         (rand-type (get-type rand)))
+                     (transform-form rator
+                                     `(has-type (lambda ([,rator-cont : ,rator-type])
+                                                  : Bottom
+                                                  ,(transform-form rand
+                                                                   `(has-type (lambda ([,rand-cont : ,rand-type])
+                                                                                : Bottom
+                                                                                (has-type (,ret-continuation (has-type ((has-type ,rator-cont ,rator-type)
+                                                                                                                        (has-type ,rand-cont ,rand-type))
+                                                                                                                       ,type))
+                                                                                          Bottom))
+                                                                              (Function (,rand-type) Bottom))))
+                                                (Function (,rator-type) Bottom))))]
+                  [x (error (format "No case defined for ~a in the cps transform" typed-form))]
                   ))))
            (cpsify-form
             (lambda (return-type)
@@ -1090,36 +1114,36 @@
 
 
 (define patch-instruction
-  (lambda (inst)
-    (match inst
-      [`(,inst (deref ,var1 ,off1) (deref ,var2 ,off2))
-       `((movq (deref ,var1 ,off1) (reg rax))
-         (,inst (reg rax) (deref ,var2 ,off2)))]
-      [`(,inst (deref ,var1 ,off1) (global-value ,var2))
-       `((movq (deref ,var1 ,off1) (reg rax))
-         (,inst (reg rax) (global-value ,var2)))]
-      [`(,inst (global-value ,var1) (deref ,var2 ,off2))
-       `((movq (global-value ,var1) (reg rax))
-         (,inst (reg rax) (deref ,var2 ,off2)))]
-      [`(,inst (global-value ,var1) (global-value ,var2))
-       `((movq (global-value ,var1) (reg rax))
-         (,inst (reg rax) (global-value ,var2)))]
-      [`(movzbq ,reg (deref ,var ,off))
-       `((movzbq ,reg (reg rax))
-         (movq (reg rax) (deref ,var ,off)))]
-      [`(neg (deref ,var ,off))
-       `((movq (deref ,var ,off) (reg rax))
-         (neg (reg rax))
-         (movq (reg rax) (deref ,var ,off)))]
-      [`(cmpq ,arg (int ,num))
-       `((movq (int ,num) (reg rax))
-         (cmpq ,arg (reg rax)))]
-      [`(cmpq ,arg (bool ,b))
-       `((movq (bool ,b) (reg rax))
-         (cmpq ,arg (reg rax)))]
-      [`(movq (reg ,reg) (reg ,reg))
-       '()]
-      [x `(,x)])))
+  (let ((is-memory-ref?
+         (lambda (stuff)
+           (match stuff
+             [`(deref ,_ ,_) #t]
+             [`(global-value ,_) #t]
+             [_ #f]))))
+    (lambda (inst)
+      (match inst
+        [`(,inst ,(? is-memory-ref? fst) ,(? is-memory-ref? snd))
+         `((movq ,fst (reg rax))
+           (,inst (reg rax) ,snd))]
+        [`(leaq (function-ref ,func) ,(? is-memory-ref? mem))
+         `((leaq (function-ref ,func) (reg rax))
+           (movq (reg rax) ,mem))]
+        [`(movzbq ,reg (deref ,var ,off))
+         `((movzbq ,reg (reg rax))
+           (movq (reg rax) (deref ,var ,off)))]
+        [`(neg (deref ,var ,off))
+         `((movq (deref ,var ,off) (reg rax))
+           (neg (reg rax))
+           (movq (reg rax) (deref ,var ,off)))]
+        [`(cmpq ,arg (int ,num))
+         `((movq (int ,num) (reg rax))
+           (cmpq ,arg (reg rax)))]
+        [`(cmpq ,arg (bool ,b))
+         `((movq (bool ,b) (reg rax))
+           (cmpq ,arg (reg rax)))]
+        [`(movq (reg ,reg) (reg ,reg))
+         '()]
+        [x `(,x)]))))
 
 (debug-define patch-instructions
   (lambda (prog)

@@ -393,12 +393,12 @@
                   continuation
                   (cpsify-rands (cdr rands)
                                 (cdr names)
-                                ,(transform-form
-                                  (car rands)
-                                  `(has-type (lambda ([,(car names) : ,(get-type (car rands))])
-                                               : Bottom
-                                               ,continuation)
-                                             (Function (,(get-type (car rands))) Bottom)))))))
+                                (transform-form
+                                 (car rands)
+                                 `(has-type (lambda ([,(car names) : ,(get-type (car rands))])
+                                              : Bottom
+                                              ,continuation)
+                                            (Function (,(get-type (car rands))) Bottom)))))))
            (expand-form
             (lambda (typed-form)
               (let-values ([(form type)
@@ -447,45 +447,76 @@
                                                              ,ret-continuation)
                                                             Bottom))
                                                 (Function (,(get-type func)) Bottom))))]
+                  [`(if ,test ,true ,false)
+                   (let ((test-val (gensym 'test-cont)))
+                     (transform-form test
+                                     `(has-type (lambda ([,test-val : Boolean])
+                                                  : Bottom
+                                                  (has-type (if (has-type ,test-val Boolean)
+                                                                ,(transform-form true ret-continuation)
+                                                                ,(transform-form false ret-continuation))
+                                                            ,type))
+                                                (Function (Boolean) Bottom))))]
+                  [`(let ((,var ,val)) ,body)
+                   (transform-form `(has-type ((has-type (lambda ([,var : ,(get-type val)])
+                                                           : ,type
+                                                           ,body)
+                                                         (Function (,(get-type val)) ,type))
+                                               ,val)
+                                              ,type)
+                                   ret-continuation)]
                   [`(lambda ,vars
                       : ,ret-type
                       ,body)
                    `(has-type (,ret-continuation ,(expand-form typed-form))
                               Bottom)]
-                  [`((has-type ,exp built-in) ,rand1 ,rand2)
-                   (let ((rand1-cont (gensym 'rand1-cont))
-                         (rand2-cont (gensym 'rand2-cont)))
-                     (transform-form rand1
-                                     `(has-type (lambda ([,rand1-cont : Integer])
-                                                  : Bottom
-                                                  ,(transform-form rand2
-                                                                   `(has-type (lambda ([,rand2-cont : Integer])
-                                                                                : Bottom
-                                                                                (has-type (,ret-continuation (has-type ((has-type ,exp built-in)
-                                                                                                                        (has-type ,rand1-cont Integer)
-                                                                                                                        (has-type ,rand2-cont Integer))
-                                                                                                                       Integer))
-                                                                                          Bottom))
-                                                                              (Function (Integer) Bottom))))
-                                                (Function (Integer) Bottom))))]
-                  [`(,rator ,rand)
-                   (let ((rator-cont (gensym 'rator))
-                         (rand-cont (gensym 'rand))
-                         (rator-type (get-type rator))
-                         (rand-type (get-type rand)))
-                     (transform-form rator
-                                     `(has-type (lambda ([,rator-cont : ,rator-type])
-                                                  : Bottom
-                                                  ,(transform-form rand
-                                                                   `(has-type (lambda ([,rand-cont : ,rand-type])
-                                                                                : Bottom
-                                                                                (has-type ((has-type ,rator-cont ,rator-type)
-                                                                                           (has-type ,rand-cont ,rand-type)
-                                                                                           ,ret-continuation)
-                                                                                           ;; (has-type ,ret-continuation (Function (,rand-type) Bottom)))
-                                                                                          Bottom))
-                                                                              (Function (,rand-type) Bottom))))
-                                                (Function (,rator-type) Bottom))))]
+                  [`((has-type vector-ref built-in)
+                     ,vector-form
+                     ,num)
+                   (let ((new-name (gensym)))
+                     (cpsify-rands (list vector-form)
+                                   (list new-name)
+                                   `(has-type (,ret-continuation
+                                               (has-type ((has-type vector-ref built-in)
+                                                          (has-type ,new-name ,(get-type vector-form))
+                                                          ,num)
+                                                         ,type))
+                                              Bottom)))]
+                  [`((has-type vector-set! built-in)
+                     ,vector-form
+                     ,index
+                     ,new-val)
+                   (let ((vec-form-name (gensym))
+                         (vec-val-name (gensym)))
+                     (cpsify-rands (reverse (list vector-form new-val))
+                                   (reverse (list vec-form-name vec-val-name))
+                                   `(has-type (,ret-continuation
+                                               (has-type ((has-type vector-set! built-in)
+                                                          (has-type ,vec-form-name ,(get-type vector-form))
+                                                          ,index
+                                                          (has-type ,vec-val-name ,(get-type new-val)))
+                                                         ,type))
+                                              Bottom)))]
+                  [`((has-type ,exp built-in) ,rands ...)
+                   (let ((names-typed (map (lambda (rand)
+                                             `(has-type ,(gensym) ,(get-type rand)))
+                                           rands)))
+                     (cpsify-rands (reverse rands)
+                                   (reverse (map cadr names-typed))
+                                   `(has-type (,ret-continuation (has-type ((has-type ,exp built-in) ,@names-typed)
+                                                                           ,type))
+                                              Bottom)))]
+                  [`(,rator ,rands ...)
+                   (let ((names-typed (map (lambda (rand)
+                                             `(has-type ,(gensym) ,(get-type rand)))
+                                           rands))
+                         (rator-name (gensym)))
+                     (cpsify-rands (reverse (cons rator rands))
+                                   (reverse (cons rator-name (map cadr names-typed)))
+                                   `(has-type ((has-type ,rator-name ,(get-type rator))
+                                               ,@names-typed
+                                               ,ret-continuation)
+                                              Bottom)))]
                   [x (error (format "No case defined for ~a in the cps transform" typed-form))]
                   ))))
            (cpsify-form
@@ -498,7 +529,11 @@
            (cpsify-define
             (lambda (def)
               (match def
-                [x x]))))
+                [`(define (,name ,args ...) : ,ret-type ,body)
+                 (let ((cont-name (gensym))
+                       (cont-type `(Function (,ret-type) Bottom)))
+                   `(define (,name ,@args [,cont-name : ,cont-type]) : Bottom
+                      ,(transform-form body `(has-type ,cont-name ,cont-type))))]))))
     (lambda (prog)
       (match prog
         [`(program ,type ,defs ,bodies)
@@ -1999,14 +2034,15 @@
    typecheck-R4
    ))
 
-(define run-some
-  (compose
-   (lambda (prog) (time (allocate-registers prog)))
-   (lambda (prog) (time (build-interference prog)))
-   (lambda (prog) (time (uncover-live prog)))
-   (lambda (prog) (time (select-instructions prog)))
-   (lambda (prog) (time (flatten prog)))
-   (lambda (prog) (time ((uniquify (u-state built-ins 0)) prog)))))
+;; (define run-some
+;;   (compose
+;;    (lambda (prog) (time (allocate-registers prog)))
+;;    (lambda (prog) (time (build-interference prog)))
+;;    (lambda (prog) (time (uncover-live prog)))
+;;    (lambda (prog) (time (select-instructions prog)))
+;;    (lambda (prog) (time (flatten prog)))
+;;    (lambda (prog) (time (expand-cps prog)
+;;    (lambda (prog) (time ((uniquify (u-state built-ins 0)) prog)))))
 
 (provide make-graph
          graph-equal?

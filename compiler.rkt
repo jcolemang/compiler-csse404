@@ -611,7 +611,7 @@
         ))))
 
 (define make-def-from-lambda
-  (lambda (lam free-vars vec-type)
+  (lambda (lam new-body free-vars vec-type)
     (match lam
       [`(lambda ,params : ,type ,body)
        (let ((name (gensym 'lambda))
@@ -619,7 +619,7 @@
          (letrec ((assign-free-vars
                    (lambda (free-vars i)
                      (if (null? free-vars)
-                         body
+                         new-body
                          `(has-type (let ([,(caar free-vars) (has-type
                                                               ((has-type vector-ref built-in)
                                                                (has-type ,closure-name ,vec-type)
@@ -665,21 +665,26 @@
                                        (convert-exp-to-closures body)])
                            (let* ((free-vars (set->list (list->set (free-variables typed-exp))))
                                   (vec-type `(Vector ,type ,@(map cdr free-vars)))
-                                  (new-def (make-def-from-lambda exp free-vars vec-type))
+                                  ;; (new-def (make-def-from-lambda exp free-vars vec-type))
+                                  (new-def (make-def-from-lambda exp new-body free-vars vec-type))
                                   (old-type type))
                              (match new-def
+                               ;; [`(define (,name ,params ...) : ,new-def-type ,new-def-body)
+                               ;;  (let-values ([(new-def-body-defs new-new-def-body)
+                               ;;                (convert-exp-to-closures new-def-body)])
+                               ;;    (let ((new-new-def
+                               ;;           `(define (,name ,@params) : ,new-def-type ,new-new-def-body)))
+                               ;;      (set! type vec-type)
+                               ;;      (values `(,new-new-def ,@new-def-body-defs)
+                               ;;              `((has-type vector built-in) (has-type (function-ref ,(caadr new-new-def)) ,old-type)
+                               ;;                ,@(map (lambda (x) `(has-type ,(car x) ,(cdr x))) free-vars))
+                               ;;              )))])))]
                                [`(define (,name ,params ...) : ,new-def-type ,new-def-body)
-
-                                (let-values ([(new-def-body-defs new-new-def-body)
-                                              (convert-exp-to-closures new-def-body)])
-                                  (let ((new-new-def
-                                         `(define (,name ,@params) : ,new-def-type ,new-new-def-body)))
-                                    (set! type vec-type)
-                                    (values `(,new-new-def ,@new-def-body-defs)
-                                            `((has-type vector built-in) (has-type (function-ref ,(caadr new-new-def)) ,old-type)
-                                              ,@(map (lambda (x) `(has-type ,(car x) ,(cdr x))) free-vars))
-
-                                            )))])))]
+                                (set! type vec-type)
+                                (values `(,@body-defines ,new-def)
+                                        `((has-type vector built-in) (has-type (function-ref ,name) ,old-type)
+                                          ,@(map (lambda (x) `(has-type ,(car x) ,(cdr x))) free-vars))
+                                        )])))]
                         [`(let ((,var ,val)) ,body)
                          (let-values ([(val-defines new-val)
                                        (convert-exp-to-closures val)]
@@ -1134,7 +1139,7 @@
                     (movq (reg rsp) (reg rbp))
                     (subq (int ,(+ stack-num max-def-stack-n)) (reg rsp))
                     (movq (int 2048) (reg rdi))
-                    (movq (int 65536) (reg rsi))
+                    (movq (int ,(* 4 65536)) (reg rsi))
                     (callq initialize)
                     (movq (global-value rootstack_begin) (reg r15))
                     (movq (int 0) (deref r15 0))

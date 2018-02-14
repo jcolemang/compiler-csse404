@@ -1,4 +1,3 @@
-
 (define (try [f : ((Integer -> Integer) -> Integer)]) : Integer
   (call/cc (lambda: ([k : (Integer -> Integer)]) : Integer
             (f k))))
@@ -13,8 +12,8 @@
 
 (define (safe-fib [x : Integer]) : Integer
   (try (lambda: ([throw : (Integer -> Integer)]) : Integer
-              (if (< x 0)
-                  (throw -1)
-                  (fib x)))))
+                (fib (if (< x 0)
+                         (throw -1)
+                         x)))))
 
 (safe-fib (read))

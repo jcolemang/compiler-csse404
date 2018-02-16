@@ -535,11 +535,21 @@
                    `(define (,name ,@args [,cont-name : ,cont-type]) : Bottom
                       ,(transform-form body `(has-type ,cont-name ,cont-type))))]))))
     (lambda (prog)
-      (match prog
-        [`(program ,type ,defs ,bodies)
-         `(program ,type
-                   ,(map cpsify-define defs)
-                   ,(map (cpsify-form type) bodies))]))))
+      (if (contains? prog 'call/cc)
+          (match prog
+            [`(program ,type ,defs ,bodies)
+             `(program ,type
+                       ,(map cpsify-define defs)
+                       ,(map (cpsify-form type) bodies))])
+          prog
+          )
+      )))
+
+(define contains?
+  (lambda (x target)
+    (if (list? x)
+        (ormap (lambda (v) (contains? v target)) x)
+        (equal? x target))))
 
 (debug-define reveal-functions
   (lambda (prog)

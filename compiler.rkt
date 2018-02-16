@@ -1817,6 +1817,16 @@
              (list? right)
              (andmap type-equal? left right)))))
 
+
+(define bottom-or-type
+  (lambda types
+    (cond [(null? types)
+           (error 'bottom-or-type "pass at least one arg")]
+          [(null? (cdr types)) (car types)]
+          [(eq? 'Bottom (car types)) 'Bottom]
+          [else (apply bottom-or-type (cdr types))])))
+
+
 (define typecheck-R4-curry
   (lambda (env)
     (lambda (exp)
@@ -1940,12 +1950,17 @@
              ,arg2)
            (match `(,(recur arg1)
                     ,(recur arg2))
-             [`((has-type ,typed-arg1 Boolean)
-                (has-type ,typed-arg2 Boolean))
-              `(has-type ((has-type ,rator built-in)
-                          (has-type ,typed-arg1 Boolean)
-                          (has-type ,typed-arg2 Boolean))
-                         Boolean)])]
+             [`((has-type ,typed-arg1 ,type-1)
+                (has-type ,typed-arg2 ,type-2))
+              (if (and (type-equal? type-1 'Boolean)
+                       (type-equal? type-2 'Boolean))
+                  `(has-type ((has-type ,rator built-in)
+                              (has-type ,typed-arg1 ,type-1)
+                              (has-type ,typed-arg2 ,type-1))
+                             ,(bottom-or-type type-1 type-2))
+                  (type-error 'and 'Boolean `(,type-1 ,type-2))
+                  )
+              ])]
           [`(,(and (or 'eq?)
                    rator)
              ,arg1
@@ -1989,7 +2004,7 @@
              [`(has-type ,typed-exp ,type)
               (if (not (type-equal? type 'Boolean))
                   (type-error 'not 'Boolean type)
-                  `(has-type ((has-type not built-in) (has-type ,typed-exp Boolean)) Boolean))])]
+                  `(has-type ((has-type not built-in) (has-type ,typed-exp Boolean)) ,type))])]
           [`(if ,test ,true ,false)
            (let ((test-typed (recur test))
                  (true-typed (recur true))
@@ -1997,13 +2012,20 @@
              (match `(,test-typed
                       ,true-typed
                       ,false-typed)
-               [`((has-type ,_ Boolean)
-                  (has-type ,_ ,branch-type)
-                  (has-type ,_ ,branch-type))
-                `(has-type (if ,test-typed
-                               ,true-typed
-                               ,false-typed)
-                           ,branch-type)]))]
+               [`((has-type ,_ ,test-type)
+                  (has-type ,_ ,true-type)
+                  (has-type ,_ ,false-type))
+                (if (and (type-equal? test-type 'Boolean)
+                         (type-equal? true-type false-type))
+                    `(has-type (if ,test-typed
+                                   ,true-typed
+                                   ,false-typed)
+                               ,(if (equal? 'Bottom true-type)
+                                    false-type
+                                    true-type))
+                    (type-error 'if 'something 'something-else)
+                    )
+                ]))]
           [`(let ((,vars ,vals) ...) ,body)
            (--> typed-pairs <- (map (lambda (var val)
                                    (list var (recur val)))

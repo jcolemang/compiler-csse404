@@ -1838,11 +1838,11 @@
                [`(Function (,arg-type) ,ret-type)
                 (match arg-type
                   [`(Function (,arg-arg-type) ,arg-ret-type)
-                   ;; (if (not (eqv? arg-ret-type 'Bottom))
-                       ;; (type-error 'call/cc 'Bottom arg-ret-type)
+                   (if (not (eqv? arg-ret-type 'Bottom))
+                       (type-error 'call/cc 'Bottom arg-ret-type)
                        `(has-type ((has-type call/cc built-in)
                                    ,typed-func)
-                                  ,arg-arg-type)])]))]
+                                  ,arg-arg-type))])]))]
           [`(define (,name ,vars ...) : ,type ,body)
            (let ((typed-body ((typecheck-R4-curry
                                (extend-env-vars (map (lambda (wrong-cell)
@@ -1965,12 +1965,20 @@
           [`(+ ,arg1 ,arg2)
            (match `(,(recur arg1)
                     ,(recur arg2))
-             [`((has-type ,typed-arg1 Integer)
-                (has-type ,typed-arg2 Integer))
-              `(has-type ((has-type + built-in)
-                          (has-type ,typed-arg1 Integer)
-                          (has-type ,typed-arg2 Integer))
-                         Integer)]
+             [`((has-type ,typed-arg1 ,arg1-type)
+                (has-type ,typed-arg2 ,arg2-type))
+              (if (not (and (type-equal? 'Integer arg1-type)
+                            (type-equal? 'Integer arg2-type)))
+                  (type-error '+
+                              '(Integer Integer)
+                              `(,arg1-type ,arg2-type))
+                  `(has-type ((has-type + built-in)
+                              (has-type ,typed-arg1 ,arg1-type)
+                              (has-type ,typed-arg2 ,arg2-type))
+                             ,(if (or (eqv? arg1-type 'Bottom)
+                                      (eqv? arg2-type 'Bottom))
+                                  'Bottom
+                                  'Integer)))]
              [`((has-type ,_ ,bad-arg1-type)
                 (has-type ,_ ,bad-arg2-type))
               (type-error '+
@@ -2023,7 +2031,7 @@
                (match func-type
                  [`(Function ,param-types ,return-type)
                   (if (not (type-equal? (map get-type params-typed)
-                                   param-types))
+                                        param-types))
                       (type-error 'user-func param-types (map get-type params-typed))
                       `(has-type (,func-typed ,@params-typed) ,return-type))])))]
           )))))
@@ -2061,15 +2069,76 @@
    typecheck-R4
    ))
 
-;; (define run-some
-;;   (compose
-;;    (lambda (prog) (time (allocate-registers prog)))
-;;    (lambda (prog) (time (build-interference prog)))
-;;    (lambda (prog) (time (uncover-live prog)))
-;;    (lambda (prog) (time (select-instructions prog)))
-;;    (lambda (prog) (time (flatten prog)))
-;;    (lambda (prog) (time (expand-cps prog)
-;;    (lambda (prog) (time ((uniquify (u-state built-ins 0)) prog)))))
+(define run-all-timed
+  (compose
+   (lambda (prog)
+     (display 'print-instructions)
+     (newline)
+     (time (print-instructions prog)))
+   (lambda (prog)
+     (display 'patch-instructions)
+     (newline)
+     (time (patch-instructions prog)))
+   (lambda (prog)
+     (display 'add-bookkeeping)
+     (newline)
+     (time (add-bookkeeping prog)))
+   (lambda (prog)
+     (display 'lower-conditionals)
+     (newline)
+     (time (lower-conditionals prog)))
+   (lambda (prog)
+     (display 'add-register-saves)
+     (newline)
+     (time (add-register-saves prog)))
+   (lambda (prog)
+     (display 'allocate-registers)
+     (newline)
+     (time (allocate-registers prog)))
+   (lambda (prog)
+     (display 'manage-root-stack)
+     (newline)
+     (time (manage-root-stack prog)))
+   (lambda (prog)
+     (display 'build-interference)
+     (newline)
+     (time (build-interference prog)))
+   (lambda (prog)
+     (display 'uncover-live)
+     (newline)
+     (time (uncover-live prog)))
+   (lambda (prog)
+     (display 'select-instructions)
+     (newline)
+     (time (select-instructions prog)))
+   (lambda (prog)
+     (display 'flatten)
+     (newline)
+     (time (flatten prog)))
+   (lambda (prog)
+     (display 'expose-allocation)
+     (newline)
+     (time (expose-allocation prog)))
+   (lambda (prog)
+     (display 'convert-to-closures)
+     (newline)
+     (time (convert-to-closures prog)))
+   (lambda (prog)
+     (display 'reveal-functions)
+     (newline)
+     (time (reveal-functions prog)))
+   (lambda (prog)
+     (display 'expand-cps)
+     (newline)
+     (time (expand-cps prog)))
+   (lambda (prog)
+     (display 'uniquify)
+     (newline)
+     (time (uniquify prog)))
+   (lambda (prog)
+     (display 'typecheck)
+     (newline)
+     (time (typecheck-R4 prog)))))
 
 (provide make-graph
          graph-equal?
@@ -2085,6 +2154,8 @@
          set-remove
          empty-set
          set-equal?
+
+         u-state
 
          live-after-sets
 
@@ -2113,4 +2184,5 @@
          u-state
          built-ins
          run-all
+         run-all-timed
          )

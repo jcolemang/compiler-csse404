@@ -1,20 +1,11 @@
 #lang racket
 
-;; TODO fix register allocation maybe? Theres just a bug somewhere......
-
-;; NOTE Look into using basic blocks in the compiler
+;; DONE jump-to-loc
 
 ;; NOTE Look into the differences between generational garbage collecting and
 ;; copy collecting. Check out some of the references on page 81
 
 ;; NOTE Look into using type information in garbage collecting. See page 82
-
-
-;; Need to get uncover-live to spit out data which indicates whether it was a
-;; simple instruction or an if statement. For the if statements, recursive
-;; processing is also necessary. The next step, build-interference, needs to
-;; interpret these and act recursively on the if statements as well.
-
 
 
 
@@ -524,7 +515,9 @@
               (lambda (form)
                 (let ((return-var (gensym 'return-value)))
                   (transform-form form `(has-type (lambda ([,return-var : ,return-type]) : ,return-type
-                                                          (has-type ,return-var ,return-type))
+                                                          (has-type ((has-type cleanup built-in)
+                                                                     (has-type ,return-var ,return-type))
+                                                                    ,return-type))
                                                   (Function (,return-type) ,return-type)))))))
            (cpsify-define
             (lambda (def)
@@ -535,14 +528,14 @@
                    `(define (,name ,@args [,cont-name : ,cont-type]) : Bottom
                       ,(transform-form body `(has-type ,cont-name ,cont-type))))]))))
     (lambda (prog)
-      (if (contains? prog 'call/cc)
+      ;; (if (contains? prog 'call/cc)
           (match prog
             [`(program ,type ,defs ,bodies)
              `(program ,type
                        ,(map cpsify-define defs)
                        ,(map (cpsify-form type) bodies))])
-          prog
-          )
+          ;; prog
+          ;; )
       )))
 
 (define contains?
@@ -679,16 +672,6 @@
                                   (new-def (make-def-from-lambda exp new-body free-vars vec-type))
                                   (old-type type))
                              (match new-def
-                               ;; [`(define (,name ,params ...) : ,new-def-type ,new-def-body)
-                               ;;  (let-values ([(new-def-body-defs new-new-def-body)
-                               ;;                (convert-exp-to-closures new-def-body)])
-                               ;;    (let ((new-new-def
-                               ;;           `(define (,name ,@params) : ,new-def-type ,new-new-def-body)))
-                               ;;      (set! type vec-type)
-                               ;;      (values `(,new-new-def ,@new-def-body-defs)
-                               ;;              `((has-type vector built-in) (has-type (function-ref ,(caadr new-new-def)) ,old-type)
-                               ;;                ,@(map (lambda (x) `(has-type ,(car x) ,(cdr x))) free-vars))
-                               ;;              )))])))]
                                [`(define (,name ,params ...) : ,new-def-type ,new-def-body)
                                 (set! type vec-type)
                                 (values `(,@body-defines ,new-def)
@@ -937,11 +920,6 @@
                              exp-result
                              `((,exp-result . ,type)
                                ,@(concat-map caddr results))))]
-                  ;; [`(,rator ,(? integer? x) ...)
-                  ;;  (let ((new-sym (gensym 'app-return-int)))
-                  ;;    (values `((assign ,new-sym ,exp))
-                  ;;            new-sym
-                  ;;            `((,new-sym . ,type))))]
                   [`(app ,rator ,rands ...)
                    (let-values ([(results)
                                  (map (lambda (exp)
@@ -997,11 +975,14 @@
                                   (map car flat)
                                   (map cadr flat))))]))))
 
+(define argument-registers
+  '(rdi rsi rdx rcx r8 r9))
+
 (define get-param-locations
   (lambda (num caller-view?)
     (let* ((regs (map (lambda (x)
                         `(reg ,x))
-                      '(rdi rsi rdx rcx r8 r9)))
+                      argument-registers))
            (stacks (map (lambda (x)
                           (if caller-view?
                               `(deref rsp ,(* 8 x))
@@ -1054,6 +1035,8 @@
                   [`(+ ,val1 ,val2)
                    `((movq ,(expand val1) (var ,var))
                      (addq ,(expand val2) (var ,var)))]
+                  ;; DONE this should be the max num of rands
+                  ;; actually no, I don't think that it should
                   [`(app ,rator ,rands ...)
                    (let ((locs (get-param-locations (length rands) #t)))
                      `(,@(map (lambda (loc val)
@@ -1061,8 +1044,11 @@
                                        ,loc))
                               locs
                               rands)
-                       (indirect-callq (var ,rator))
-                       (movq (reg rax) (var ,var))))]
+                       (jump-to-loc (var ,rator))))]
+                       ;; (movq (reg rax) (var ,var))))]
+                  [`(cleanup ,ret-val)
+                   `((movq ,(expand ret-val) (reg rax))
+                     (jump-to-label (label endrealcode)))]
                   [`(read)
                    `((callq read_int)
                      (movq (reg rax) (var ,var)))]
@@ -1136,11 +1122,21 @@
 ;; I should add register saves and such here. callq should save all caller save
 ;; registers, and this should add pushs and pops at the top of all functions. In
 ;; this case, the only function is main.
-(debug-define add-bookkeeping
+(define add-bookkeeping
+  (let ((get-num-stack-params
+         (lambda (def)
+           (match def
+             [`(define (,name ,params ...) : ,type ,stack-num ,instrs)
+              (--> num-params <- (length params)
+                   num-stack-params <- (max 0 (- num-params
+                                                 (length argument-registers)))
+                   num-stack-params)]))))
   (lambda (prog)
     (match prog
       [`(program (type ,type) ,stack-num ,defines ,instrs)
-       (let ((max-def-stack-n (* 8 (apply max 0 (map get-stack-num defines)))))
+       (let ((max-def-stack-n (* 8 (apply max 0 (map get-stack-num defines))))
+             ;; TODO I think there is something wrong here
+             (max-stack-params (apply max 0 (map get-num-stack-params defines))))
          `(program ,stack-num
                    ,(map (add-bookkeeping-def max-def-stack-n) defines)
                    ((label-pos prelude)
@@ -1149,12 +1145,37 @@
                     (movq (reg rsp) (reg rbp))
                     (subq (int ,(+ stack-num max-def-stack-n)) (reg rsp))
                     (movq (int 2048) (reg rdi))
-                    (movq (int ,(* 4 65536)) (reg rsi))
+                    ;; (movq (int ,(* 1024 1024 1024)) (reg rsi))
+                    (movq (int 1024) (reg rsi))
                     (callq initialize)
                     (movq (global-value rootstack_begin) (reg r15))
                     (movq (int 0) (deref r15 0))
                     (label-pos endprelude)
+
+                    ;; DONE this should set up the stack to accommodate the
+                    ;; maximum number of stack arguments and local variables
+                    (label-pos tailcallsetup)
+                    (pushq (reg rbp))
+
+                    ;; moving rbp to the bottom of the stack
+                    (movq (reg rsp) (reg rbp))
+
+                    ;; making room for function arguments
+                    (subq (int ,(* 8 max-stack-params)) (reg rbp))
+
+                    ;; making room for local variables
+                    (subq (int ,(+ stack-num max-def-stack-n)) (reg rsp))
+
+                    (label-pos realcode)
                     ,@instrs
+                    (label-pos endrealcode)
+
+                    (addq (int ,(+ stack-num max-def-stack-n)) (reg rsp))
+                    (addq (int ,(* 8 max-stack-params)) (reg rbp))
+                    (popq (reg rbp))
+
+                    (label-pos endtailcallsetup)
+
                     (label-pos conclusion)
                     (movq (reg rax) (reg rdi))
                     (literal ,(print-by-type type))
@@ -1163,7 +1184,7 @@
                     (and (int 0) (reg rax))
                     (popq (reg rbp))
                     (retq))))]
-      )))
+      ))))
 
 (define add-bookkeeping-def
   (lambda (max-stack-n)
@@ -1171,19 +1192,23 @@
       (match def
         [`(define (,name ,params ...) : ,type ,stack-num ,instrs)
          `(define (,name ,@params) ,stack-num
-            ((pushq (reg rbp))
-             (movq (reg rsp) (reg rbp))
-             ,@(map (lambda (reg)
-                      `(pushq (reg ,reg)))
-                    callee-save-regs)
-             (subq (int ,(+ stack-num max-stack-n)) (reg rsp))
+            (
+             ;; (pushq (reg rbp))
+             ;;  (movq (reg rsp) (reg rbp))
+             ;; DONE this is not correct with tail calls
+             ;; ,@(map (lambda (reg)
+             ;;          `(pushq (reg ,reg)))
+             ;;        callee-save-regs)
+             ;; (subq (int ,(+ stack-num max-stack-n)) (reg rsp))
              ,@instrs
-             (addq (int ,(+ stack-num max-stack-n)) (reg rsp))
-             ,@(map (lambda (reg)
-                      `(popq (reg ,reg)))
-                    (reverse callee-save-regs))
-             (popq (reg rbp))
-             (retq)))]))))
+             ;; DONE uncomment this if no tail calls
+             ;; (addq (int ,(+ stack-num max-stack-n)) (reg rsp))
+             ;; ,@(map (lambda (reg)
+             ;;          `(popq (reg ,reg)))
+             ;;        (reverse callee-save-regs))
+             ;; (popq (reg rbp))
+             ;; (retq)))]))))
+             ))]))))
 
 
 (define patch-instruction
@@ -1260,13 +1285,17 @@
       [`(global-value ,global-value)
        (format "~a(%rip)" global-value)]
       [`(jmp-if equal ,location)
-       (format "	je	~a" (print-instructions location))]
+       (format "	je		~a" (print-instructions location))]
       [`(sete ,reg)
        (format "	~a	~a" 'sete (print-instructions reg))]
       [`(function-ref ,name)
        (format "~a(%rip)" name)]
       [`(indirect-callq ,arg)
        (format "	callq	*~a" (print-instructions arg))]
+      [`(jump-to-loc ,arg)
+       (format "	jmp	 *~a" (print-instructions arg))]
+      [`(jump-to-label ,arg)
+       (format "	jmp	~a" (print-instructions arg))]
       [`(,rator ,inst1 ,inst2)
        (format "	~a	~a,	~a"
                rator
@@ -1300,6 +1329,8 @@
         [`(movq (var ,var) ,_) `(,var)]
         [`(movq ,_ ,_) '()]
         [`(callq ,_) '()]
+        [`(jump-to-loc ,_) '()]
+        [`(jump-to-label ,_) '()]
         [(or `(addq ,_ ,_)
              `(eq? ,_ ,_)
              `(xorq ,_ ,_)
@@ -1339,6 +1370,8 @@
              `(movzbq ,_ ,_))
          (std-two-arg-writes instr)]
         [`(callq ,_) '()]
+        [`(jump-to-loc ,_) '()]
+        [`(jump-to-label ,_) '()]
         [`(neg (var ,var))
          `(,var)]
         [`(not (var ,var))
@@ -1454,6 +1487,8 @@
       [(or `(spill-vectors-to-root-stack)
            `(restore-vectors-from-root-stack)
            `(indirect-callq ,_)
+           `(jump-to-loc ,_)
+           `(jump-to-label ,_)
            `(callq ,_)
            `(movq ,_ ,_)
            `(cmpq ,_ ,_)
@@ -1695,6 +1730,7 @@
            (let ((to-backup (map (lambda (live-regs instr)
                                    (match instr
                                      [`(callq ,func-name)
+                                      (error func-name)
                                       (filter caller-save? live-regs)]
                                      [_ '()]))
                                  live-regss
